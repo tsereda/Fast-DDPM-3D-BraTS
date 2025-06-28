@@ -1,15 +1,19 @@
-# Basic 3D Fast-DDPM configuration for BraTS
+# 3D Fast-DDPM configuration for BraTS - Updated for Fast-DDPM compatibility
 # Start with small volumes and scale up
 
 model:
-  name: "FastDDPM3D"
-  in_channels: 4  # 4 BraTS modalities
-  out_channels: 1  # 1 target modality
-  base_channels: 64
-  channel_multipliers: [1, 2, 4]  # Smaller for 3D
+  type: "sg"  # Fast-DDPM model type
+  in_channels: 4  # 4 BraTS modalities (unified 4→4)
+  out_ch: 1  # 1 target modality
+  ch: 64  # Base channels
+  ch_mult: [1, 2, 4]  # Smaller for 3D memory constraints  
   num_res_blocks: 2
-  attention_resolutions: [8]  # Only at low resolution for memory
+  attn_resolutions: [8]  # Only at low resolution for memory
   dropout: 0.1
+  var_type: fixedsmall
+  ema_rate: 0.999
+  ema: true
+  resamp_with_conv: true
   
 diffusion:
   timesteps: 10  # Fast-DDPM advantage
