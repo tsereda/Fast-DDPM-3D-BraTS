@@ -1,0 +1,3 @@
+[submodule "external/fast-ddpm"]
+	path = external/fast-ddpm
+	url = https://github.com/mirthAI/Fast-DDPM.git
