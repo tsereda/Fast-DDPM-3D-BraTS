@@ -1,0 +1,63 @@
+# Basic 3D Fast-DDPM configuration for BraTS
+# Start with small volumes and scale up
+
+model:
+  name: "FastDDPM3D"
+  in_channels: 4  # 4 BraTS modalities
+  out_channels: 1  # 1 target modality
+  base_channels: 64
+  channel_multipliers: [1, 2, 4]  # Smaller for 3D
+  num_res_blocks: 2
+  attention_resolutions: [8]  # Only at low resolution for memory
+  dropout: 0.1
+  
+diffusion:
+  timesteps: 10  # Fast-DDPM advantage
+  beta_schedule: "linear"
+  beta_start: 1e-4
+  beta_end: 2e-2
+  loss_type: "l2"
+  
+training:
+  batch_size: 1  # Must be 1 for 3D volumes
+  learning_rate: 1e-4
+  weight_decay: 1e-6
+  epochs: 100
+  gradient_clip: 1.0
+  
+  # Memory optimization
+  mixed_precision: true
+  gradient_checkpointing: true
+  
+  # Validation
+  validate_every: 5
+  save_every: 10
+
+data:
+  volume_size: [64, 64, 64]  # Start small, scale to [144, 192, 192]
+  normalize: true
+  augmentation:
+    rotation: true
+    flip: true
+    elastic: false  # Too memory intensive for now
+  
+  # Unified 4→4 training
+  min_input_modalities: 1
+  max_input_modalities: 3
+  
+logging:
+  log_every: 10
+  sample_every: 50
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+
+# Progressive training strategy
+progressive:
+  start_size: [64, 64, 64]
+  target_size: [144, 192, 192] 
+  grow_every: 20  # epochs
+  
+# Memory estimates (rough):
+# 64³: ~8GB VRAM
+# 96³: ~16GB VRAM  
+# 144x192x192: ~24GB VRAM
