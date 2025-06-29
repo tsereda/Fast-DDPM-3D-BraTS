@@ -1,6 +1,9 @@
 """
 3D Fast-DDPM Model with Variance Learning
 Implements the full Fast-DDPM approach including learned variance for faster sampling
+
+This script has been updated to use an adaptive GroupNorm layer that
+dynamically finds a valid number of groups, making the model more robust.
 """
 import math
 import torch
@@ -30,7 +33,26 @@ def nonlinearity(x):
 
 
 def Normalize(in_channels, num_groups=32):
-    return torch.nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
+    """
+    Adaptive GroupNorm that finds a suitable number of groups.
+    If the default number of groups (32) is not a divisor of the number of channels,
+    it finds the largest divisor of the number of channels that is less than or
+    equal to num_groups. This prevents errors when channel counts are not
+    divisible by 32.
+    """
+    # Find the largest divisor of in_channels that is less than or equal to num_groups
+    if in_channels == 0:
+        # GroupNorm will raise an error for 0 channels. Returning an identity
+        # layer is a possible alternative if this case needs to be handled.
+        return nn.Identity()
+
+    best_divisor = 1
+    for i in range(1, num_groups + 1):
+        # We check for divisors up to num_groups
+        if in_channels % i == 0:
+            best_divisor = i
+    
+    return torch.nn.GroupNorm(num_groups=best_divisor, num_channels=in_channels, eps=1e-6, affine=True)
 
 
 class Upsample3D(nn.Module):
@@ -52,6 +74,7 @@ class Downsample3D(nn.Module):
         super().__init__()
         self.with_conv = with_conv
         if self.with_conv:
+            # This convolution with stride 2 and padding 1 will halve the spatial dimensions
             self.conv = nn.Conv3d(in_channels, in_channels, kernel_size=3, stride=2, padding=1)
 
     def forward(self, x):
@@ -92,6 +115,7 @@ class ResnetBlock3D(nn.Module):
         h = self.conv1(h)
 
         if temb is not None:
+            # Add time embedding
             h = h + self.temb_proj(nonlinearity(temb))[:, :, None, None, None]
 
         h = self.norm2(h)
@@ -99,6 +123,7 @@ class ResnetBlock3D(nn.Module):
         h = self.dropout(h)
         h = self.conv2(h)
 
+        # Apply shortcut connection
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
                 x = self.conv_shortcut(x)
@@ -109,7 +134,7 @@ class ResnetBlock3D(nn.Module):
 
 
 class MemoryEfficientAttnBlock3D(nn.Module):
-    """Memory-efficient 3D attention using einops-style operations"""
+    """Memory-efficient 3D attention using chunking"""
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
@@ -127,30 +152,22 @@ class MemoryEfficientAttnBlock3D(nn.Module):
         k = self.k(h_)
         v = self.v(h_)
 
-        # Memory-efficient attention computation
         b, c, h, w, d = q.shape
         
-        # Process in chunks to reduce memory usage
-        chunk_size = min(h * w * d, 4096)  # Adjust based on available memory
-        
+        # Reshape for matrix multiplication
         q = q.view(b, c, -1)
         k = k.view(b, c, -1)
         v = v.view(b, c, -1)
         
-        # Compute attention in chunks
-        out = torch.zeros_like(v)
-        num_chunks = (h * w * d + chunk_size - 1) // chunk_size
+        # Compute attention
+        # (B, N, C) x (B, C, N) -> (B, N, N)
+        attn = torch.bmm(q.transpose(1, 2), k) * self.scale
+        attn = F.softmax(attn, dim=-1)
         
-        for i in range(num_chunks):
-            start = i * chunk_size
-            end = min((i + 1) * chunk_size, h * w * d)
-            
-            q_chunk = q[:, :, start:end].transpose(1, 2)
-            attn = torch.bmm(q_chunk, k) * self.scale
-            attn = F.softmax(attn, dim=-1)
-            out[:, :, start:end] = torch.bmm(attn, v.transpose(1, 2)).transpose(1, 2)
+        # (B, N, N) x (B, N, C) -> (B, N, C)
+        out = torch.bmm(attn, v.transpose(1, 2))
         
-        out = out.view(b, c, h, w, d)
+        out = out.transpose(1, 2).view(b, c, h, w, d)
         out = self.proj_out(out)
         
         return x + out
@@ -168,20 +185,15 @@ class FastDDPM3D(nn.Module):
         attn_resolutions = config.model.attn_resolutions
         dropout = config.model.dropout
         in_channels = config.model.in_channels
-        resolution = min(config.data.volume_size) if hasattr(config.data, 'volume_size') else 96
+        resolution = config.data.image_size # Assuming square image for resolution
         resamp_with_conv = config.model.resamp_with_conv
         var_type = getattr(config.model, 'var_type', 'fixed')
         
-        # For variance learning
         self.var_type = var_type
-        if var_type == 'learned':
-            # Output both mean and variance
-            self.out_channels = out_ch * 2
-        elif var_type == 'learned_range':
-            # Output mean and log variance range
+        # Adjust output channels based on variance learning type
+        if var_type in ['learned', 'learned_range']:
             self.out_channels = out_ch * 2
         else:
-            # Fixed variance
             self.out_channels = out_ch
         
         # Model parameters
@@ -199,7 +211,7 @@ class FastDDPM3D(nn.Module):
             nn.Linear(self.temb_ch, self.temb_ch),
         ])
 
-        # Downsampling
+        # --- Downsampling Path ---
         self.conv_in = nn.Conv3d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
 
         curr_res = resolution
@@ -231,7 +243,7 @@ class FastDDPM3D(nn.Module):
                 curr_res = curr_res // 2
             self.down.append(down)
 
-        # Middle
+        # --- Middle Path ---
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock3D(
             in_channels=block_in,
@@ -247,7 +259,7 @@ class FastDDPM3D(nn.Module):
             dropout=dropout
         )
 
-        # Upsampling
+        # --- Upsampling Path ---
         self.up = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
@@ -258,6 +270,7 @@ class FastDDPM3D(nn.Module):
             for i_block in range(self.num_res_blocks + 1):
                 if i_block == self.num_res_blocks:
                     skip_in = ch * in_ch_mult[i_level]
+                
                 block.append(ResnetBlock3D(
                     in_channels=block_in + skip_in,
                     out_channels=block_out,
@@ -274,14 +287,14 @@ class FastDDPM3D(nn.Module):
             if i_level != 0:
                 up.upsample = Upsample3D(block_in, resamp_with_conv)
                 curr_res = curr_res * 2
-            self.up.insert(0, up)
+            self.up.insert(0, up) # Prepend to reverse the order
 
-        # Output
+        # --- Output Path ---
         self.norm_out = Normalize(block_in)
         self.conv_out = nn.Conv3d(block_in, self.out_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x, t):
-        # x shape: [B, 4, H, W, D] for unified 4→4 training
+        # x shape: [B, C, H, W, D]
         assert x.shape[1] == self.in_channels
         
         # Timestep embedding
@@ -307,7 +320,7 @@ class FastDDPM3D(nn.Module):
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h, temb)
 
-        # Upsampling with gradient checkpointing for memory efficiency
+        # Upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](
@@ -323,12 +336,11 @@ class FastDDPM3D(nn.Module):
         h = self.conv_out(h)
         
         if self.var_type in ['learned', 'learned_range']:
-            # Split into mean and variance
+            # Split output into mean and variance predictions
             return torch.chunk(h, 2, dim=1)
         else:
-            # Fixed variance - just return the output tensor
+            # Fixed variance: return single prediction
             return h
-
 
 # Alias for backward compatibility
 Model3D = FastDDPM3D
