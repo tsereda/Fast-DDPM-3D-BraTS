@@ -1,5 +1,5 @@
 # Optimized Fast-DDPM 3D configuration with variance learning
-# Memory-efficient settings and full Fast-DDPM features
+# Memory-efficient settings for 10.6GB GPU
 
 model:
   type: "fast_ddpm"  # Full Fast-DDPM with variance learning
@@ -55,14 +55,14 @@ training:
   accumulate_grad_batches: 4  # Effective batch size of 4
 
 data:
-  # Current volume size (adjust based on your GPU)
-  volume_size: [96, 96, 96]  # Default for 16GB GPU
+  # UPDATED: Reduced volume size for 10.6GB GPU
+  volume_size: [80, 80, 80]  # Changed from [96, 96, 96]
   
   # Volume sizes for different GPUs (reference)
   volume_sizes:
     # GPU memory -> volume size
     "8GB": [64, 64, 64]
-    "11GB": [80, 80, 80]  # RTX 2080 Ti
+    "11GB": [80, 80, 80]  # Your GPU falls here (10.6GB)
     "16GB": [96, 96, 96]  # T4, V100 16GB
     "24GB": [112, 112, 112]  # RTX 3090, RTX 4090
     "32GB": [128, 128, 128]  # V100 32GB
