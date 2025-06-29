@@ -185,7 +185,7 @@ class FastDDPM3D(nn.Module):
         attn_resolutions = config.model.attn_resolutions
         dropout = config.model.dropout
         in_channels = config.model.in_channels
-        resolution = config.data.image_size # Assuming square image for resolution
+        resolution = config.data.volume_size[0] # Use first dimension as resolution
         resamp_with_conv = config.model.resamp_with_conv
         var_type = getattr(config.model, 'var_type', 'fixed')
         
