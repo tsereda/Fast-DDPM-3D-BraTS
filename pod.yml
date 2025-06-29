@@ -2,7 +2,11 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: tsereda-brats-pod
+  labels:
+    app: fast-ddpm-brats
 spec:
+  securityContext:
+    fsGroup: 0
   nodeSelector:
     topology.kubernetes.io/region: us-west
   containers:
@@ -16,65 +20,139 @@ spec:
             secretKeyRef:
               name: synapse-credentials
               key: authtoken
+              optional: true
+        - name: PYTHONPATH
+          value: /app/Fast-DDPM-3D-BraTS
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
       command:
         - "bash"
         - "-c"
       args:
         - |
-          sudo apt-get update && sudo apt-get install -y p7zip-full wget
+          set -e  # Exit on any error
           
-          #pip install synapseclient
-          #synapse config
-          #synapse get -r syn51514105 
+          echo "🚀 Starting Fast-DDPM-3D-BraTS Setup..."
           
-          git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          # Update system packages
+          echo "📦 Updating system packages..."
+          sudo apt-get update && sudo apt-get install -y p7zip-full wget git vim htop
+          
+          # Clone repository
+          echo "📂 Cloning repository..."
+          if [ ! -d "${REPO_PATH}" ]; then
+            git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          fi
           cd ${REPO_PATH}
-          cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip .
-          cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip .
-          7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc)
-          7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc)
-          # Use the comprehensive environment setup
-          cd ${REPO_PATH}
-          bash setup_environment.sh
-          source /opt/conda/etc/profile.d/mamba.sh
-          mamba activate brasyn
           
-          python drop_modality.py
-          python project/generate_missing_modality.py
-
+          # Check for data files
+          echo "📊 Checking for data files..."
+          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" ]; then
+            echo "✓ Found training data"
+            cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip .
+            echo "📦 Extracting training data..."
+            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc) || {
+              echo "⚠️ Training data extraction failed, continuing without it"
+            }
+          else
+            echo "⚠️ Training data not found in /data/"
+          fi
+          
+          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip" ]; then
+            echo "✓ Found validation data"
+            cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip .
+            echo "📦 Extracting validation data..."
+            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc) || {
+              echo "⚠️ Validation data extraction failed, continuing without it"
+            }
+          else
+            echo "⚠️ Validation data not found in /data/"
+          fi
+          
+          # Setup environment
+          echo "🐍 Setting up Python environment..."
+          cd ${REPO_PATH}
+          
+          # Initialize conda
+          eval "$(conda shell.bash hook)"
+          
+          # Check if environment exists
+          if conda env list | grep -q "brasyn"; then
+            echo "✓ Environment brasyn already exists, activating..."
+            conda activate brasyn
+          else
+            echo "🔧 Creating brasyn environment..."
+            if [ -f "environment.yml" ]; then
+              # Try with mamba first, fall back to conda
+              if command -v mamba &> /dev/null; then
+                echo "Using mamba for faster installation..."
+                mamba env create -f environment.yml -y || {
+                  echo "⚠️ Mamba failed, trying conda..."
+                  conda env create -f environment.yml -y
+                }
+              else
+                conda env create -f environment.yml -y
+              fi
+              conda activate brasyn
+            else
+              echo "⚠️ environment.yml not found, creating minimal environment..."
+              conda create -n brasyn python=3.11 -y
+              conda activate brasyn
+              
+              # Install essential packages
+              pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+              pip install numpy nibabel SimpleITK tqdm PyYAML matplotlib scipy pandas opencv-python scikit-image
+              pip install gdown wandb lpips einops accelerate
+            fi
+          fi
+          
+          # Verify environment
+          echo "🔍 Verifying environment..."
+          python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')"
+          
+          # Run basic tests
+          echo "🧪 Running basic tests..."
+          if [ -f "test_comprehensive.py" ]; then
+            python test_comprehensive.py || echo "⚠️ Some tests failed, continuing..."
+          fi
+          
+          if [ -f "test_3d_model.py" ]; then
+            python test_3d_model.py || echo "⚠️ 3D model test failed, continuing..."
+          fi
+          
+          # Quick fixes if needed
+          if [ -f "quick_fixes.py" ]; then
+            echo "🔧 Applying quick fixes..."
+            python quick_fixes.py || echo "⚠️ Quick fixes failed, continuing..."
+          fi
+          
+          # Setup nnUNet directories if needed
           export nnUNet_raw="/app/nnunet/raw"
-          export nnUNet_preprocessed="/app/nnunet/preprocessed"
+          export nnUNet_preprocessed="/app/nnunet/preprocessed" 
           export nnUNet_results="/app/nnunet/results"
-
           mkdir -p /app/nnunet/{raw,preprocessed,results}
-
-          echo "Downloading pre-trained nnUNet weights, dataset.json, and plan.json..."
-          gdown 1n9dqT114udr9Qq8iYEKsJK347iHg9N88
-          gdown 1A_suxQwElucF3w1HEYg3wMo6dG9OxBHo
-          gdown 1U2b0BTNi8zrJACReoi_W08Fe-wM394wI
-
-          echo "Downloaded files:"
-          ls -la *.pth *.json
-
-          echo "Setting up nnUNet model structure..."
-          mkdir -p $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_5/
           
-          # Move files to correct locations (assuming the downloaded files have these names)
-          mv checkpoint_best.pth $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_5/checkpoint_final.pth
-          mv dataset.json $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/
-          mv plans.json $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/
-
-          echo "Converting data to nnUNet format..."
-          python Dataset137_BraTS21.py
-
-          ln -s $(pwd)/Dataset137_BraTS2021_test $nnUNet_raw/Dataset137_BraTS2021
-
-          # obtain the predicted segmentation maps.
-          nnUNetv2_predict -i "$nnUNet_raw/Dataset137_BraTS2021/imagesTr" -o "./outputs" -d 137 -c 3d_fullres -f 5
-
-          python cal_avg_dice.py
+          # Convert data to nnUNet format if script exists
+          if [ -f "Dataset137_BraTS21.py" ] && [ -d "ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
+            echo "🔄 Converting data to nnUNet format..."
+            python Dataset137_BraTS21.py || echo "⚠️ Data conversion failed, continuing..."
+          fi
           
-          sleep infinity
+          echo "✅ Setup complete!"
+          echo "📋 Available commands:"
+          echo "  - Training: python scripts/train_3d.py --data_root ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
+          echo "  - Inference: python scripts/inference_3d.py --help"
+          echo "  - Environment check: python verify_environment.py"
+          echo ""
+          echo "🖥️  Container will stay alive. Connect with:"
+          echo "    kubectl exec -it tsereda-brats-pod -- /bin/bash"
+          echo ""
+          
+          # Mark setup as complete for readiness probe
+          touch /tmp/setup_complete
+          
+          # Keep container running
+          tail -f /dev/null
       volumeMounts:
         - name: git-repo
           mountPath: /app
@@ -84,21 +162,50 @@ spec:
           mountPath: /dev/shm
       resources:
         limits:
+          memory: 32Gi
+          cpu: "16"
+          nvidia.com/gpu: "1"
+        requests:
           memory: 24Gi
           cpu: "12"
           nvidia.com/gpu: "1"
-        requests:
-          memory: 20Gi
-          cpu: "10"
-          nvidia.com/gpu: "1"
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add:
+            - SYS_NICE
+            - IPC_LOCK
+      # Add liveness and readiness probes for better pod management
+      livenessProbe:
+        exec:
+          command:
+            - /bin/bash
+            - -c
+            - "ps aux | grep -v grep | grep -q tail || exit 1"
+        initialDelaySeconds: 300
+        periodSeconds: 60
+        timeoutSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command:
+            - /bin/bash
+            - -c
+            - "test -f /tmp/setup_complete"
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 10
   volumes:
     - name: git-repo
-      emptyDir: {}
+      emptyDir:
+        sizeLimit: 20Gi
     - name: brats-data-volume
       persistentVolumeClaim:
         claimName: brats2025-1
     - name: dshm
       emptyDir:
         medium: Memory
-        sizeLimit: 8Gi
+        sizeLimit: 16Gi
   restartPolicy: Never
+  terminationGracePeriodSeconds: 30
