@@ -168,9 +168,9 @@ class FastDDPM3D(nn.Module):
         attn_resolutions = config.model.attn_resolutions
         dropout = config.model.dropout
         in_channels = config.model.in_channels
-        resolution = min(config.data.volume_size)
+        resolution = min(config.data.volume_size) if hasattr(config.data, 'volume_size') else 96
         resamp_with_conv = config.model.resamp_with_conv
-        var_type = config.model.var_type
+        var_type = getattr(config.model, 'var_type', 'fixed')
         
         # For variance learning
         self.var_type = var_type
@@ -326,7 +326,8 @@ class FastDDPM3D(nn.Module):
             # Split into mean and variance
             return torch.chunk(h, 2, dim=1)
         else:
-            return h, None
+            # Fixed variance - just return the output tensor
+            return h
 
 
 # Alias for backward compatibility

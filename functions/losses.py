@@ -63,7 +63,6 @@ def discretized_gaussian_log_likelihood(x, means, log_scales):
         torch.where(x > 0.999, log_one_minus_cdf_min, torch.log(cdf_delta.clamp(min=1e-12)))
     )
     return log_probs
-    return log_probs
 
 
 def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'):
@@ -167,15 +166,44 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
     return loss.mean()
 
 
-# Backward compatibility
-noise_estimation_loss = fast_ddpm_loss
-
-def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas):
+def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, keepdim=False):
     """
-    Simple noise estimation loss (alias for fast_ddpm_loss with fixed variance)
-    For backward compatibility with existing training scripts
+    Simple noise estimation loss for 3D (fixed variance)
+    
+    Args:
+        model: 3D diffusion model
+        x_available: [B, 4, H, W, D] - available input modalities
+        x_target: [B, 1, H, W, D] - target modality
+        t: [B] - timesteps
+        e: [B, 1, H, W, D] - noise
+        betas: beta schedule
+        keepdim: whether to keep dimensions
     """
-    return fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='fixed')
+    # Ensure t is bounded
+    t = torch.clamp(t, 0, len(betas) - 1)
+    
+    # Get alpha values  
+    a = (1 - betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1, 1)
+    
+    # Add noise to target
+    x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
+    
+    # Create model input by replacing first channel
+    model_input = x_available.clone()
+    model_input[:, 0:1] = x_noisy
+    
+    # Get model prediction
+    output = model(model_input, t.float())
+    
+    # Handle tuple output from variance learning models
+    if isinstance(output, tuple):
+        output = output[0]
+    
+    # Compute loss
+    if keepdim:
+        return (e - output).square().sum(dim=(1, 2, 3, 4))
+    else:
+        return (e - output).square().sum(dim=(1, 2, 3, 4)).mean(dim=0)
 
 
 def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
@@ -191,8 +219,9 @@ def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
         sqrt_alphas_cumprod = torch.sqrt(1.0 - betas).cumprod(dim=0)
         sqrt_one_minus_alphas_cumprod = torch.sqrt(betas.cumsum(dim=0))
         
-        a_t = sqrt_alphas_cumprod[t].view(-1, 1, 1, 1, 1)
-        sqrt_one_minus_a_t = sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1, 1)
+        t_clamped = torch.clamp(t, 0, len(betas) - 1)
+        a_t = sqrt_alphas_cumprod[t_clamped].view(-1, 1, 1, 1, 1)
+        sqrt_one_minus_a_t = sqrt_one_minus_alphas_cumprod[t_clamped].view(-1, 1, 1, 1, 1)
         
         x_noisy = x_target * a_t + e * sqrt_one_minus_a_t
         
@@ -208,3 +237,38 @@ def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
         l1_loss = torch.nn.functional.l1_loss(x0_pred, x_target)
     
     return alpha * main_loss + (1 - alpha) * l1_loss
+
+
+# Legacy loss functions for backward compatibility
+def noise_estimation_loss(model, x0, t, e, b, keepdim=False):
+    """Original 2D noise estimation loss for backward compatibility"""
+    a = (1-b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+    x = x0 * a.sqrt() + e * (1.0 - a).sqrt()
+    output = model(x, t.float())
+    if isinstance(output, tuple):
+        output = output[0]
+    if keepdim:
+        return (e - output).square().sum(dim=(1, 2, 3))
+    else:
+        return (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
+
+
+def sr_noise_estimation_loss(model, x_bw, x_md, x_fw, t, e, b, keepdim=False):
+    """SR noise estimation loss for backward compatibility"""
+    a = (1-b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+    x = x_md * a.sqrt() + e * (1.0 - a).sqrt()
+    output = model(torch.cat([x_bw, x_fw, x], dim=1), t.float())
+    if isinstance(output, tuple):
+        output = output[0]
+    if keepdim:
+        return (e - output).square().sum(dim=(1, 2, 3))
+    else:
+        return (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
+
+
+# Loss registry for backward compatibility
+loss_registry = {
+    'simple': noise_estimation_loss,
+    'sr': sr_noise_estimation_loss,
+    'sg': sg_noise_estimation_loss
+}
