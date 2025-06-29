@@ -298,26 +298,7 @@ spec:
           # Test Python environment
           python -c "import sys; print(f'Python: {sys.version}'); import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}') if torch.cuda.is_available() else None" 2>/dev/null || echo "⚠️ Python environment check failed"
           
-          # Run basic tests (skip if memory is low)
-          echo "🧪 Running basic tests..."
-          mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
-          if [ "$mem_usage" -lt 75 ]; then
-            if [ -f "test_comprehensive.py" ]; then
-              python test_comprehensive.py || echo "⚠️ Some tests failed, continuing..."
-            fi
-            
-            if [ -f "test_3d_model.py" ]; then
-              python test_3d_model.py || echo "⚠️ 3D model test failed, continuing..."
-            fi
-          else
-            echo "⚠️ Skipping tests due to high memory usage (${mem_usage}%)"
-          fi
-          
-          # Quick fixes if needed
-          if [ -f "quick_fixes.py" ]; then
-            echo "🔧 Applying quick fixes..."
-            python quick_fixes.py || echo "⚠️ Quick fixes failed, continuing..."
-          fi
+          python test.py
           
           # Setup nnUNet directories if needed
           export nnUNet_raw="/app/nnunet/raw"
@@ -353,6 +334,7 @@ spec:
           echo "💾 Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
           echo "💻 Load: $(uptime | awk -F'load average:' '{print $2}')"
           echo "📁 Disk usage: $(df -h /app | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
+          python scripts/train_3d.py  --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
           
           # Mark setup as complete for readiness probe
           touch /tmp/setup_complete
