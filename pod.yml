@@ -26,6 +26,10 @@ spec:
           value: /app/nnunet/preprocessed
         - name: nnUNet_results
           value: /app/nnunet/results
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONIOENCODING
+          value: "UTF-8"
       
       command: ["/bin/bash", "-c"]
       args:
@@ -51,14 +55,12 @@ spec:
             fi
           done
           
-          conda create -n brasyn python=3.11 -y
-          conda activate brasyn
           pip install pyyaml
           pip install torch
           pip install tqdm
           pip install numpy
           pip install nibabel
-          python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+          python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData 2>&1 | tee -a /app/training.log
           
           # Keep pod running
           tail -f /dev/null

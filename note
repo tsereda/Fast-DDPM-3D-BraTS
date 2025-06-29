@@ -1,2 +1,0 @@
-python test_training_pipeline.py
-python scripts/train_3d.py --data_root /path/to/your/brats/data --debug
