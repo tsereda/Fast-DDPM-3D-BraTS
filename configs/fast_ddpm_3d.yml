@@ -38,7 +38,7 @@ training:
   gradient_checkpointing: true
 
 data:
-  volume_size: [96, 96, 96]  # Start with 96³, scale up gradually
+  volume_size: [96, 96, 96]  # Good for T4 (16GB) - use [64,64,64] for RTX 2080S, [128,128,128] for A100
   normalize: true
   num_workers: 4
   
@@ -78,16 +78,3 @@ eval:
 # 96³ × batch_size=1: ~12GB VRAM  
 # 128³ × batch_size=1: ~20GB VRAM
 # 144×192×192 × batch_size=1: ~24GB VRAM
-
-# Recommended hardware:
-# - RTX 3090/4090 (24GB): volume_size=[96,96,96] or [128,128,128]
-# - RTX 3080 (10GB): volume_size=[64,64,64] or [80,80,80]
-# - RTX 4080 (16GB): volume_size=[96,96,96]
-
-# what ill be running this on, update and remove the above
-
-# RTX  2090 S
-# T4
-# A100
-
-#dont worry about multi gpu rn

@@ -10,7 +10,7 @@ spec:
       image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp
       env:
         - name: REPO_PATH
-          value: /app/BraSyn_tutorial
+          value: /app/Fast-DDPM-3D-BraTS
         - name: SYNAPSE_AUTHTOKEN
           valueFrom:
             secretKeyRef:
@@ -27,7 +27,7 @@ spec:
           #synapse config
           #synapse get -r syn51514105 
           
-          git clone https://github.com/tsereda/BraSyn_tutorial.git ${REPO_PATH}
+          git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip .
           cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip .
