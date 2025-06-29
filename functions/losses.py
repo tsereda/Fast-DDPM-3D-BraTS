@@ -14,18 +14,40 @@ def compute_alpha(beta, t):
     return a
 
 
+def extract(a, t, x_shape):
+    """Extract coefficients at specified timesteps and reshape to broadcast with x_shape"""
+    b, *_ = t.shape
+    out = a.gather(-1, t)
+    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+
+
+def q_posterior_mean_variance(x_start, x_t, alpha_t, alpha_prev):
+    """Compute posterior mean and variance for diffusion process"""
+    posterior_mean = (
+        extract(alpha_prev, x_t.shape[0], x_t.shape).sqrt() * x_start +
+        extract((1 - alpha_prev), x_t.shape[0], x_t.shape).sqrt() * x_t
+    ) / extract((1 - alpha_t), x_t.shape[0], x_t.shape)
+    
+    posterior_variance = extract(
+        (1 - alpha_prev) * (1 - alpha_t) / (1 - alpha_t), 
+        x_t.shape[0], x_t.shape
+    )
+    posterior_log_variance = torch.log(posterior_variance.clamp(min=1e-20))
+    
+    return posterior_mean, posterior_variance, posterior_log_variance
+
+
 def normal_kl(mean1, logvar1, mean2, logvar2):
-    """
-    KL divergence between two Gaussians.
-    """
-    return 0.5 * (-1.0 + logvar2 - logvar1 + torch.exp(logvar1 - logvar2) + 
-                  ((mean1 - mean2) ** 2) * torch.exp(-logvar2))
+    """Compute KL divergence between two normal distributions"""
+    return 0.5 * (
+        -1.0 + logvar2 - logvar1 + torch.exp(logvar1 - logvar2)
+        + ((mean1 - mean2) ** 2) * torch.exp(-logvar2)
+    )
 
 
 def discretized_gaussian_log_likelihood(x, means, log_scales):
-    """
-    Compute the log-likelihood of a Gaussian distribution discretizing to a given image.
-    """
+    """Compute log likelihood for discretized Gaussian"""
+    assert x.shape == means.shape == log_scales.shape
     centered_x = x - means
     inv_stdv = torch.exp(-log_scales)
     plus_in = inv_stdv * (centered_x + 1.0 / 255.0)
@@ -38,7 +60,7 @@ def discretized_gaussian_log_likelihood(x, means, log_scales):
     log_probs = torch.where(
         x < -0.999,
         log_cdf_plus,
-        torch.where(x > 0.999, log_one_minus_cdf_min, torch.log(cdf_delta.clamp(min=1e-12))),
+        torch.where(x > 0.999, log_one_minus_cdf_min, torch.log(cdf_delta.clamp(min=1e-12)))
     )
     return log_probs
 
@@ -142,42 +164,6 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
         loss = mean_loss + 0.001 * kl
     
     return loss.mean()
-
-
-def q_posterior_mean_variance(x_start, x_t, a_t, a_prev):
-    """
-    Compute the mean and variance of the diffusion posterior q(x_{t-1} | x_t, x_0).
-    """
-    posterior_mean = (
-        extract(torch.sqrt(a_prev), t, x_start.shape) * (1.0 - a_t / a_prev) * x_start
-        + extract(torch.sqrt(a_t), t, x_start.shape) * (1.0 - a_prev) / (1.0 - a_t) * x_t
-    )
-    posterior_variance = (1.0 - a_prev) / (1.0 - a_t) * (1.0 - a_t / a_prev)
-    posterior_log_variance = torch.log(posterior_variance.clamp(min=1e-20))
-    
-    return posterior_mean, posterior_variance, posterior_log_variance
-
-
-def extract(a, t, x_shape):
-    """Extract values from a 1D tensor based on indices."""
-    batch_size = t.shape[0]
-    out = a.gather(-1, t.cpu()).to(t.device)
-    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
-
-
-def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas):
-    """
-    Simple noise estimation loss for unified 4→4 training
-    Compatible with the training script
-    """
-    return fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned_range')
-
-
-def combined_loss(model, x_available, x_target, t, e, betas, var_type='learned_range'):
-    """
-    Combined loss function alias for training compatibility
-    """
-    return fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type)
 
 
 # Backward compatibility

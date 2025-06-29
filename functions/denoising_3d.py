@@ -28,6 +28,10 @@ def generalized_steps_3d(x, seq, model, b, **kwargs):
             at_next = compute_alpha(b, next_t.long())
             xt = xs[-1].to('cuda')
             et = model(xt, t)
+            # Handle variance learning outputs
+            if isinstance(et, tuple):
+                et = et[0]  # Use mean prediction only
+            
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
             x0_preds.append(x0_t.to('cpu'))
             
@@ -61,7 +65,11 @@ def ddpm_steps_3d(x, seq, model, b, **kwargs):
             x = xs[-1].to('cuda')
 
             output = model(x, t.float())
-            e = output
+            # Handle variance learning outputs
+            if isinstance(output, tuple):
+                e = output[0]  # Use mean prediction only
+            else:
+                e = output
 
             x0_from_e = (1.0 / at).sqrt() * x - (1.0 / at - 1).sqrt() * e
             x0_from_e = torch.clamp(x0_from_e, -1, 1)
@@ -110,6 +118,10 @@ def unified_4to4_generalized_steps(x, x_available, modality_mask, seq, model, b,
             model_input[:, 0:1] = xt
             
             et = model(model_input, t)
+            # Handle variance learning outputs
+            if isinstance(et, tuple):
+                et = et[0]  # Use mean prediction only
+            
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
             x0_preds.append(x0_t.to('cpu'))
             
@@ -149,7 +161,11 @@ def unified_4to4_ddpm_steps(x, x_available, modality_mask, seq, model, b, **kwar
             model_input[:, 0:1] = x  # Replace first channel with noisy target
             
             output = model(model_input, t.float())
-            e = output
+            # Handle variance learning outputs
+            if isinstance(output, tuple):
+                e = output[0]  # Use mean prediction only
+            else:
+                e = output
 
             x0_from_e = (1.0 / at).sqrt() * x - (1.0 / at - 1).sqrt() * e
             x0_from_e = torch.clamp(x0_from_e, -1, 1)
