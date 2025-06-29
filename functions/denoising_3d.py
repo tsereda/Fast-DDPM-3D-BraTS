@@ -113,9 +113,17 @@ def unified_4to4_generalized_steps(x, x_available, modality_mask, seq, model, b,
             # Concatenate available modalities + noisy target for model input
             # Model expects [B, 4, H, W, D] input (unified 4→4)
             model_input = x_available.to('cuda')
-            # Replace one channel with current noisy state
-            # For now, use first channel (can be made more sophisticated)
-            model_input[:, 0:1] = xt
+            
+            # Smart channel replacement: find the channel with minimum variance
+            # This assumes missing/corrupted channels have lower variance
+            channel_vars = []
+            for i in range(model_input.shape[1]):
+                var = torch.var(model_input[:, i:i+1])
+                channel_vars.append(var.item())
+            
+            # Replace the channel with lowest variance (likely missing/corrupted)
+            min_var_channel = channel_vars.index(min(channel_vars))
+            model_input[:, min_var_channel:min_var_channel+1] = xt
             
             et = model(model_input, t)
             # Handle variance learning outputs

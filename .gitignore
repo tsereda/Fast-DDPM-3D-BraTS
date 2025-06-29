@@ -1,1 +1,2 @@
 */__pycache__/
+# Experiments and outputs\nexperiments/\nlogs/\ncheckpoints/\noutputs/\n*.log\n# Temporary files\n/tmp/\ndummy_*\n# IDE files\n.vscode/\n.idea/\n# OS files\n.DS_Store\nThumbs.db\n

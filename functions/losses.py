@@ -23,16 +23,16 @@ def extract(a, t, x_shape):
 
 def q_posterior_mean_variance(x_start, x_t, alpha_t, alpha_prev):
     """Compute posterior mean and variance for diffusion process"""
+    # Compute posterior mean
     posterior_mean = (
-        extract(alpha_prev, x_t.shape[0], x_t.shape).sqrt() * x_start +
-        extract((1 - alpha_prev), x_t.shape[0], x_t.shape).sqrt() * x_t
-    ) / extract((1 - alpha_t), x_t.shape[0], x_t.shape)
+        alpha_prev.sqrt() * x_start +
+        (1 - alpha_prev).sqrt() * x_t
+    ) / (1 - alpha_t).sqrt()
     
-    posterior_variance = extract(
-        (1 - alpha_prev) * (1 - alpha_t) / (1 - alpha_t), 
-        x_t.shape[0], x_t.shape
-    )
-    posterior_log_variance = torch.log(posterior_variance.clamp(min=1e-20))
+    # Compute posterior variance  
+    posterior_variance = (1 - alpha_prev) * (1 - alpha_t) / (1 - alpha_t)
+    posterior_variance = posterior_variance.clamp(min=1e-20)
+    posterior_log_variance = torch.log(posterior_variance)
     
     return posterior_mean, posterior_variance, posterior_log_variance
 
@@ -62,6 +62,7 @@ def discretized_gaussian_log_likelihood(x, means, log_scales):
         log_cdf_plus,
         torch.where(x > 0.999, log_one_minus_cdf_min, torch.log(cdf_delta.clamp(min=1e-12)))
     )
+    return log_probs
     return log_probs
 
 
@@ -168,3 +169,42 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
 
 # Backward compatibility
 noise_estimation_loss = fast_ddpm_loss
+
+def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas):
+    """
+    Simple noise estimation loss (alias for fast_ddpm_loss with fixed variance)
+    For backward compatibility with existing training scripts
+    """
+    return fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='fixed')
+
+
+def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
+    """
+    Combined loss function with multiple components
+    """
+    # Main diffusion loss
+    main_loss = fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='fixed')
+    
+    # L1 loss for additional regularization
+    with torch.no_grad():
+        # Get model prediction
+        sqrt_alphas_cumprod = torch.sqrt(1.0 - betas).cumprod(dim=0)
+        sqrt_one_minus_alphas_cumprod = torch.sqrt(betas.cumsum(dim=0))
+        
+        a_t = sqrt_alphas_cumprod[t].view(-1, 1, 1, 1, 1)
+        sqrt_one_minus_a_t = sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1, 1)
+        
+        x_noisy = x_target * a_t + e * sqrt_one_minus_a_t
+        
+        model_input = x_available.clone()
+        model_input[:, 0:1] = x_noisy
+        
+        pred = model(model_input, t.float())
+        if isinstance(pred, tuple):
+            pred = pred[0]
+        
+        # Predict x0
+        x0_pred = (x_noisy - sqrt_one_minus_a_t * pred) / a_t
+        l1_loss = torch.nn.functional.l1_loss(x0_pred, x_target)
+    
+    return alpha * main_loss + (1 - alpha) * l1_loss

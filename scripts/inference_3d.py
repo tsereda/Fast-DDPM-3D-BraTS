@@ -305,8 +305,20 @@ def main():
                         'available': available_modalities
                     })
                 
+        except FileNotFoundError as e:
+            print(f"File not found for {case_dir}: {e}")
+            continue
+        except torch.cuda.OutOfMemoryError as e:
+            print(f"GPU out of memory for {case_dir}: {e}")
+            torch.cuda.empty_cache()
+            continue
+        except ValueError as e:
+            print(f"Value error processing {case_dir}: {e}")
+            continue
         except Exception as e:
-            print(f"Error processing {case_dir}: {e}")
+            print(f"Unexpected error processing {case_dir}: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
             continue
     
     # Summary

@@ -27,6 +27,6 @@ for count, ff in enumerate(folder_list):
     file_list = os.listdir(os.path.join(val_set_folder, ff))
 
     for mm in file_list:
-        print(modality_list[drop_index[count]] + ' is droppd for case ' + mm)
+        print(modality_list[drop_index[count]] + ' is dropped for case ' + mm)
         if not modality_list[drop_index[count]] in mm:
             shutil.copyfile(os.path.join(val_set_folder, ff, mm), os.path.join(val_set_missing, ff, mm))

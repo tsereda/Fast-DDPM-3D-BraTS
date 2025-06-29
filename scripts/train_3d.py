@@ -24,6 +24,8 @@ try:
     from models.diffusion_3d import Model3D
     from functions.losses import sg_noise_estimation_loss, combined_loss
     from data.brain_3d_unified import BraTS3DUnifiedDataset
+    from utils.gpu_memory import get_recommended_volume_size, check_memory_usage
+    from utils.data_validation import validate_brats_data_structure, print_validation_results
     print("✓ Successfully imported 3D components")
 except ImportError as e:
     print(f"✗ Import error: {e}")
@@ -197,6 +199,27 @@ def main():
     
     # Dataset and DataLoader
     logging.info("Setting up datasets...")
+    
+    # Validate data structure first
+    validation_results = validate_brats_data_structure(args.data_root)
+    print_validation_results(validation_results)
+    
+    if not validation_results['valid']:
+        raise ValueError("Invalid data structure. Please check your BraTS data directory.")
+    
+    # Auto-adjust volume size based on GPU memory
+    recommended_size = get_recommended_volume_size()
+    if hasattr(config.data, 'volume_size'):
+        original_size = tuple(config.data.volume_size)
+        print(f"Config volume size: {original_size}")
+        print(f"Recommended volume size: {recommended_size}")
+        
+        # Use the smaller of the two (more conservative)
+        final_size = tuple(min(o, r) for o, r in zip(original_size, recommended_size))
+        config.data.volume_size = final_size
+        print(f"Using volume size: {final_size}")
+    else:
+        config.data.volume_size = recommended_size
     
     # Check if data root exists
     if not os.path.exists(args.data_root):

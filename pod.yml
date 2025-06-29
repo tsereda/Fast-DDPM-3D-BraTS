@@ -33,11 +33,11 @@ spec:
           cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip .
           7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc)
           7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc)
+          # Use the comprehensive environment setup
+          cd ${REPO_PATH}
+          bash setup_environment.sh
           source /opt/conda/etc/profile.d/mamba.sh
-          mamba create -n brasyn python=3.10 -y
           mamba activate brasyn
-          pip install -r project/requirements.txt
-          pip install nnunetv2 gdown simpleitk numpy batchgenerators
           
           python drop_modality.py
           python project/generate_missing_modality.py
