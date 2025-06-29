@@ -254,7 +254,7 @@ spec:
             done
             
             # Install optional packages only if memory allows
-            local mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
+            mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
             if [ "$mem_usage" -lt 75 ]; then
               echo "📦 Installing optional packages..."
               for package in "${optional_packages[@]}"; do
@@ -300,7 +300,7 @@ spec:
           
           # Run basic tests (skip if memory is low)
           echo "🧪 Running basic tests..."
-          local mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
+          mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
           if [ "$mem_usage" -lt 75 ]; then
             if [ -f "test_comprehensive.py" ]; then
               python test_comprehensive.py || echo "⚠️ Some tests failed, continuing..."
@@ -326,7 +326,7 @@ spec:
           mkdir -p /app/nnunet/{raw,preprocessed,results}
           
           # Convert data to nnUNet format if script exists (skip if memory is low)
-          local mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
+          mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
           if [ "$mem_usage" -lt 70 ] && [ -f "Dataset137_BraTS21.py" ] && [ -d "ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
             echo "🔄 Converting data to nnUNet format..."
             python Dataset137_BraTS21.py || echo "⚠️ Data conversion failed, continuing..."
