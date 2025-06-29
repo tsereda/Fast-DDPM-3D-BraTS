@@ -19,12 +19,22 @@ echo "🔧 Creating brasyn environment..."
 if command -v mamba &> /dev/null; then
     echo "Using mamba..."
     mamba env create -f environment.yml -y || {
-        echo "⚠️ Environment creation failed, trying with conda..."
-        conda env create -f environment.yml -y
+        echo "⚠️ Environment creation failed with mamba, trying with conda..."
+        conda env create -f environment.yml -y || {
+            echo "❌ Both mamba and conda failed. Please check environment.yml for issues."
+            echo "Common issues:"
+            echo "  - Package version conflicts"
+            echo "  - Missing channels"
+            echo "  - Network connectivity"
+            exit 1
+        }
     }
 else
     echo "Using conda..."
-    conda env create -f environment.yml -y
+    conda env create -f environment.yml -y || {
+        echo "❌ Environment creation failed. Please check environment.yml for issues."
+        exit 1
+    }
 fi
 
 echo "✅ Activating brasyn environment..."

@@ -67,7 +67,7 @@ dependencies:
     
     # Image quality metrics
     - lpips>=0.1.4
-    - scikit-metrics>=0.3.3
+    - scikit-learn>=1.3.0
     
     # Memory profiling (optional)
     - memory-profiler>=0.60.0
