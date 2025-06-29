@@ -165,6 +165,20 @@ def extract(a, t, x_shape):
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
 
 
+def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas):
+    """
+    Simple noise estimation loss for unified 4→4 training
+    Compatible with the training script
+    """
+    return fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned_range')
+
+
+def combined_loss(model, x_available, x_target, t, e, betas, var_type='learned_range'):
+    """
+    Combined loss function alias for training compatibility
+    """
+    return fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type)
+
+
 # Backward compatibility
-sg_noise_estimation_loss = fast_ddpm_loss
 noise_estimation_loss = fast_ddpm_loss

@@ -32,7 +32,7 @@ except ImportError as e:
 
 def parse_args():
     parser = argparse.ArgumentParser(description='3D Fast-DDPM Training for BraTS')
-    parser.add_argument('--config', type=str, default='configs/basic_3d.yml', help='Path to config file')
+    parser.add_argument('--config', type=str, default='configs/fast_ddpm_3d.yml', help='Path to config file')
     parser.add_argument('--data_root', type=str, required=True, help='Path to BraTS data')
     parser.add_argument('--exp', type=str, default='./experiments', help='Experiment directory')
     parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats', help='Experiment name')

@@ -55,7 +55,10 @@ training:
   accumulate_grad_batches: 4  # Effective batch size of 4
 
 data:
-  # Volume sizes for different GPUs (auto-detected)
+  # Current volume size (adjust based on your GPU)
+  volume_size: [96, 96, 96]  # Default for 16GB GPU
+  
+  # Volume sizes for different GPUs (reference)
   volume_sizes:
     # GPU memory -> volume size
     "8GB": [64, 64, 64]
@@ -65,9 +68,6 @@ data:
     "32GB": [128, 128, 128]  # V100 32GB
     "40GB": [144, 144, 144]  # A100
     "80GB": [160, 160, 160]  # A100 80GB
-  
-  # Default if auto-detection fails
-  default_volume_size: [96, 96, 96]
   
   # Data settings
   normalize: true

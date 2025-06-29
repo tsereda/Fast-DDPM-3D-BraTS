@@ -27,7 +27,7 @@ def test_3d_model():
     print("Testing 3D Fast-DDPM Model...")
     
     # Load config
-    config_path = 'configs/basic_3d.yml'
+    config_path = 'configs/fast_ddpm_3d.yml'
     if not os.path.exists(config_path):
         print(f"Config file {config_path} not found!")
         return False
