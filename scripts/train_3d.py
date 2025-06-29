@@ -21,7 +21,7 @@ sys.path.append('.')
 sys.path.append('..')
 
 try:
-    from models.diffusion_3d import Model3D
+    from models.fast_ddpm_3d import FastDDPM3D
     from functions.losses import sg_noise_estimation_loss, combined_loss
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     from utils.gpu_memory import get_recommended_volume_size, check_memory_usage
@@ -276,7 +276,7 @@ def main():
     # Model
     logging.info("Setting up 3D Fast-DDPM model...")
     try:
-        model = Model3D(config).to(device)
+        model = FastDDPM3D(config).to(device)
         if torch.cuda.device_count() > 1 and not args.debug:
             model = torch.nn.DataParallel(model)
             logging.info(f"Using {torch.cuda.device_count()} GPUs")
