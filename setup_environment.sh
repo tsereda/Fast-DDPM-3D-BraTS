@@ -10,19 +10,29 @@ echo "🚀 Starting Fast-DDPM-3D-BraTS Environment Setup..."
 echo "📦 Updating system packages..."
 sudo apt-get update && sudo apt-get install -y p7zip-full wget git
 
-# Initialize conda/mamba
+# Initialize conda
 echo "🐍 Initializing conda environment..."
-source /opt/conda/etc/profile.d/mamba.sh
+eval "$(conda shell.bash hook)"
 
 # Create and activate environment
 echo "🔧 Creating brasyn environment..."
-mamba env create -f environment.yml -y || {
-    echo "⚠️ Environment creation failed, trying with conda..."
+if command -v mamba &> /dev/null; then
+    echo "Using mamba..."
+    mamba env create -f environment.yml -y || {
+        echo "⚠️ Environment creation failed, trying with conda..."
+        conda env create -f environment.yml -y
+    }
+else
+    echo "Using conda..."
     conda env create -f environment.yml -y
-}
+fi
 
 echo "✅ Activating brasyn environment..."
-mamba activate brasyn || conda activate brasyn
+if command -v mamba &> /dev/null; then
+    mamba activate brasyn
+else
+    conda activate brasyn
+fi
 
 # Verify PyTorch installation
 echo "🔍 Verifying PyTorch CUDA installation..."
@@ -62,11 +72,10 @@ except ImportError as e:
 echo "🎉 Environment setup complete!"
 echo ""
 echo "To use the environment:"
-echo "  source /opt/conda/etc/profile.d/mamba.sh"
-echo "  mamba activate brasyn"
+echo "  conda activate brasyn"
 echo ""
 echo "To verify installation:"
-echo "  python test_3d_model.py"
+echo "  python verify_environment.py"
 echo ""
 echo "Memory recommendations by GPU:"
 echo "  8GB GPU:  volume_size: [64, 64, 64]"
