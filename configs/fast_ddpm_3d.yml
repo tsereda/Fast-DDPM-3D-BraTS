@@ -1,80 +1,118 @@
-# Improved 3D Fast-DDPM configuration for BraTS
-# Optimized for memory efficiency and training stability
+# Optimized Fast-DDPM 3D configuration with variance learning
+# Memory-efficient settings and full Fast-DDPM features
 
 model:
-  type: "sg"  # Score-based generative model
+  type: "fast_ddpm"  # Full Fast-DDPM with variance learning
   in_channels: 4  # 4 BraTS modalities (unified 4→4)
-  out_ch: 1  # 1 target modality
-  ch: 64  # Base channels - can increase to 128 for better quality
-  ch_mult: [1, 2, 4, 8]  # Channel multipliers - adjusted for 3D
+  out_ch: 1  # 1 target modality 
+  ch: 48  # Reduced base channels for memory efficiency
+  ch_mult: [1, 2, 4, 8]  # Channel multipliers
   num_res_blocks: 2  # ResNet blocks per level
-  attn_resolutions: [8, 16]  # Attention at these resolutions
+  attn_resolutions: [16]  # Only attention at 16x16x16 for memory
   dropout: 0.1
-  var_type: fixedsmall
-  ema_rate: 0.999
+  var_type: "learned_range"  # Fast-DDPM variance learning: 'fixed', 'learned', or 'learned_range'
+  ema_rate: 0.9999
   ema: true
   resamp_with_conv: true
   
 diffusion:
-  beta_schedule: "linear"  # or "cosine"
-  beta_start: 1e-4
-  beta_end: 2e-2
-  num_diffusion_timesteps: 1000  # Standard DDPM
-  loss_type: "l2"
+  beta_schedule: "cosine"  # Better than linear for Fast-DDPM
+  beta_start: 0.0001
+  beta_end: 0.02
+  num_diffusion_timesteps: 1000
+  loss_type: "hybrid"  # Combined MSE + VLB
+  
+  # Fast-DDPM specific
+  sampling_timesteps: 10  # Fast sampling with only 10 steps
+  sampling_scheduler: "non-uniform"  # Optimized schedule
+  clip_denoised: true
   
 training:
-  batch_size: 1  # Must be 1 for large 3D volumes
-  learning_rate: 1e-4
-  weight_decay: 1e-6
+  batch_size: 1  # Must be 1 for 3D volumes
+  learning_rate: 2e-4
+  weight_decay: 0
   epochs: 100
   gradient_clip: 1.0
   
+  # Optimization
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  warmup_steps: 1000
+  
+  # Learning rate schedule
+  lr_scheduler: "cosine"
+  lr_min: 1e-6
+  
   # Checkpointing
-  save_every: 1000  # Save checkpoint every N steps
-  validate_every: 500  # Validate every N steps
+  save_every: 1000
+  validate_every: 500
+  log_every: 100
   
   # Memory optimization
   mixed_precision: true
   gradient_checkpointing: true
+  accumulate_grad_batches: 4  # Effective batch size of 4
 
 data:
-  volume_size: [96, 96, 96]  # Good for T4 (16GB) - use [64,64,64] for RTX 2080S, [128,128,128] for A100
+  # Volume sizes for different GPUs (auto-detected)
+  volume_sizes:
+    # GPU memory -> volume size
+    "8GB": [64, 64, 64]
+    "11GB": [80, 80, 80]  # RTX 2080 Ti
+    "16GB": [96, 96, 96]  # T4, V100 16GB
+    "24GB": [112, 112, 112]  # RTX 3090, RTX 4090
+    "32GB": [128, 128, 128]  # V100 32GB
+    "40GB": [144, 144, 144]  # A100
+    "80GB": [160, 160, 160]  # A100 80GB
+  
+  # Default if auto-detection fails
+  default_volume_size: [96, 96, 96]
+  
+  # Data settings
   normalize: true
   num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
   
-  # Data augmentation
+  # Augmentation
   augmentation:
     rotation: true
+    rotation_angles: [-10, 10]  # degrees
     flip: true
-    elastic: false  # Disable for memory
+    flip_prob: 0.5
+    elastic: false  # Disabled for memory
     color_jitter: true
+    brightness: [0.9, 1.1]
+    contrast: [0.9, 1.1]
     
-  # Unified 4→4 training parameters
+  # Unified 4→4 training
   min_input_modalities: 1
   max_input_modalities: 3
   
-# Progressive training (optional)
-progressive:
-  enabled: false  # Set to true for progressive training
-  start_size: [64, 64, 64]
-  target_size: [144, 192, 192]
-  grow_every: 20  # epochs
+# Memory optimization strategies
+memory_optimization:
+  # Gradient accumulation steps (simulates larger batch)
+  gradient_accumulation_steps: 4
   
-# Optimization settings
-optim:
-  lr: 1e-4
-  beta1: 0.9
-  weight_decay: 1e-6
+  # Activation checkpointing layers
+  checkpoint_layers: ["mid", "up.0", "up.1"]
   
-# Evaluation
-eval:
-  # Metrics to compute during validation
-  compute_ssim: true
-  compute_psnr: true
-  compute_lpips: false  # 3D LPIPS not available
+  # CPU offload for optimizer states (for very large models)
+  cpu_offload: false
   
-# Memory estimates (approximate):
-# 64³ × batch_size=1: ~6GB VRAM
-# 96³ × batch_size=1: ~12GB VRAM  
-# 128³ × batch_size=1: ~20GB VRAM
-# 144×192×192 × batch_size=1: ~24GB VRAM
+  # Clear cache periodically
+  clear_cache_every: 100
+
+# Logging and monitoring
+logging:
+  use_wandb: false  # Set to true to use Weights & Biases
+  project_name: "fast-ddpm-3d-brats"
+  log_images_every: 1000
+  log_metrics: ["loss", "mse", "vlb", "grad_norm"]
+  
+# Evaluation metrics
+evaluation:
+  metrics: ["mse", "psnr", "ssim", "lpips_3d"]
+  save_samples: true
+  num_samples: 5

@@ -1,5 +1,6 @@
 """
-Loss functions for 3D Fast-DDPM training
+Fast-DDPM loss functions with variance learning
+Implements the full Fast-DDPM approach including VLB loss
 """
 import torch
 import torch.nn.functional as F
@@ -13,9 +14,38 @@ def compute_alpha(beta, t):
     return a
 
 
-def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, unified_training=True):
+def normal_kl(mean1, logvar1, mean2, logvar2):
     """
-    Score-based Generative noise estimation loss for 3D Fast-DDPM
+    KL divergence between two Gaussians.
+    """
+    return 0.5 * (-1.0 + logvar2 - logvar1 + torch.exp(logvar1 - logvar2) + 
+                  ((mean1 - mean2) ** 2) * torch.exp(-logvar2))
+
+
+def discretized_gaussian_log_likelihood(x, means, log_scales):
+    """
+    Compute the log-likelihood of a Gaussian distribution discretizing to a given image.
+    """
+    centered_x = x - means
+    inv_stdv = torch.exp(-log_scales)
+    plus_in = inv_stdv * (centered_x + 1.0 / 255.0)
+    cdf_plus = torch.distributions.Normal(0, 1).cdf(plus_in)
+    min_in = inv_stdv * (centered_x - 1.0 / 255.0)
+    cdf_min = torch.distributions.Normal(0, 1).cdf(min_in)
+    log_cdf_plus = torch.log(cdf_plus.clamp(min=1e-12))
+    log_one_minus_cdf_min = torch.log((1.0 - cdf_min).clamp(min=1e-12))
+    cdf_delta = cdf_plus - cdf_min
+    log_probs = torch.where(
+        x < -0.999,
+        log_cdf_plus,
+        torch.where(x > 0.999, log_one_minus_cdf_min, torch.log(cdf_delta.clamp(min=1e-12))),
+    )
+    return log_probs
+
+
+def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'):
+    """
+    Fast-DDPM loss with variance learning
     
     Args:
         model: 3D diffusion model
@@ -24,113 +54,117 @@ def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, unified_
         t: [B] - timesteps
         e: [B, 1, H, W, D] - noise
         betas: beta schedule
-        unified_training: whether to use unified 4→4 training
+        var_type: 'fixed', 'learned', or 'learned_range'
     """
-    a = compute_alpha(betas, t.long())
+    batch_size = x_target.shape[0]
+    device = x_target.device
+    
+    # Get alpha values
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+    
+    # Get values for current timestep
+    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+    sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
+    log_one_minus_alphas_cumprod = torch.log(1.0 - alphas_cumprod)
+    sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
+    sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1)
+    
+    # Get values at timestep t
+    a_t = extract(alphas_cumprod, t, x_target.shape)
+    a_prev = extract(alphas_cumprod_prev, t, x_target.shape)
+    sqrt_a_t = extract(sqrt_alphas_cumprod, t, x_target.shape)
+    sqrt_one_minus_a_t = extract(sqrt_one_minus_alphas_cumprod, t, x_target.shape)
     
     # Forward diffusion: add noise to target
-    x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
+    x_noisy = x_target * sqrt_a_t + e * sqrt_one_minus_a_t
     
-    if unified_training:
-        # Unified 4→4: replace one channel of available modalities with noisy target
-        # For simplicity, replace the first channel - this can be made more sophisticated
-        model_input = x_available.clone()
-        model_input[:, 0:1] = x_noisy
+    # Unified 4→4: replace one channel with noisy target
+    model_input = x_available.clone()
+    model_input[:, 0:1] = x_noisy
+    
+    # Model prediction
+    if var_type in ['learned', 'learned_range']:
+        model_mean, model_log_variance = model(model_input, t.float())
     else:
-        # Traditional approach: concatenate available + noisy target
-        model_input = torch.cat([x_available, x_noisy], dim=1)
+        model_mean = model(model_input, t.float())
+        model_log_variance = None
     
-    # Predict noise
-    output = model(model_input, t.float())
+    # Get target values
+    # Predict x0
+    x0_pred = (x_noisy - sqrt_one_minus_a_t * model_mean) / sqrt_a_t
+    x0_pred = torch.clamp(x0_pred, -1, 1)
     
-    # L2 loss between predicted and actual noise
-    loss = F.mse_loss(e, output, reduction='none')
-    loss = loss.mean(dim=(1, 2, 3, 4))  # Mean over spatial dimensions
-    loss = loss.mean()  # Mean over batch
+    # Get distribution parameters
+    posterior_mean, posterior_variance, posterior_log_variance = \
+        q_posterior_mean_variance(x_target, x0_pred, a_t, a_prev)
     
-    return loss
-
-
-def sg_noise_estimation_loss_simple(model, x, t, e, betas):
-    """
-    Simplified noise estimation loss for basic training
+    # Simple L2 loss for mean
+    mean_loss = F.mse_loss(model_mean, e, reduction='none')
+    mean_loss = mean_loss.mean(dim=(1, 2, 3, 4))
     
-    Args:
-        model: 3D diffusion model
-        x: [B, C, H, W, D] - input (can be 4 or 1 channel)
-        t: [B] - timesteps
-        e: [B, 1, H, W, D] - noise
-        betas: beta schedule
-    """
-    a = compute_alpha(betas, t.long())
-    
-    # If input has multiple channels, take only the first for noise addition
-    if x.shape[1] > 1:
-        x_target = x[:, 0:1]  # Take first channel as target
-    else:
-        x_target = x
-    
-    # Forward diffusion
-    x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
-    
-    # If multi-channel input, replace first channel with noisy version
-    if x.shape[1] > 1:
-        model_input = x.clone()
-        model_input[:, 0:1] = x_noisy
-    else:
-        model_input = x_noisy
-    
-    # Predict noise
-    output = model(model_input, t.float())
-    
-    # L2 loss
-    loss = F.mse_loss(e, output)
-    return loss
-
-
-def perceptual_loss_3d(x_pred, x_target, weight=1.0):
-    """
-    Simple perceptual loss for 3D volumes
-    Uses L1 + gradient loss
-    """
-    # L1 loss
-    l1_loss = F.l1_loss(x_pred, x_target)
-    
-    # Gradient loss in all 3 spatial dimensions
-    grad_loss = 0
-    for dim in [2, 3, 4]:  # H, W, D dimensions
-        grad_pred = torch.diff(x_pred, dim=dim)
-        grad_target = torch.diff(x_target, dim=dim)
-        grad_loss += F.l1_loss(grad_pred, grad_target)
-    
-    grad_loss /= 3  # Average over spatial dimensions
-    
-    return weight * (l1_loss + 0.1 * grad_loss)
-
-
-def combined_loss(model, x_available, x_target, t, e, betas, perceptual_weight=0.1):
-    """
-    Combined noise estimation + perceptual loss
-    """
-    # Main diffusion loss
-    noise_loss = sg_noise_estimation_loss(model, x_available, x_target, t, e, betas)
-    
-    # Generate prediction for perceptual loss
-    with torch.no_grad():
-        a = compute_alpha(betas, t.long())
-        x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
-        model_input = x_available.clone()
-        model_input[:, 0:1] = x_noisy
-        pred_noise = model(model_input, t.float())
+    if var_type == 'fixed':
+        loss = mean_loss
+    elif var_type == 'learned':
+        # VLB loss for variance
+        true_mean = posterior_mean
+        true_log_variance = posterior_log_variance
         
-        # Estimate x0 from predicted noise
-        x_pred = (x_noisy - pred_noise * (1.0 - a).sqrt()) / a.sqrt()
+        kl = normal_kl(true_mean, true_log_variance, x0_pred, model_log_variance)
+        kl = kl.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+        
+        decoder_nll = -discretized_gaussian_log_likelihood(
+            x_target, x0_pred, 0.5 * model_log_variance
+        )
+        decoder_nll = decoder_nll.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+        
+        # At t=0, use decoder NLL, otherwise use KL
+        vb_loss = torch.where((t == 0), decoder_nll, kl)
+        
+        # Combine losses
+        loss = mean_loss + 0.001 * vb_loss
+    elif var_type == 'learned_range':
+        # Learn interpolation between fixed small and large variance
+        min_log = extract(posterior_log_variance, t, x_target.shape)
+        max_log = extract(torch.log(betas), t, x_target.shape)
+        # Model predicts interpolation fraction
+        frac = (model_log_variance + 1) / 2
+        model_log_variance = frac * max_log + (1 - frac) * min_log
+        
+        # Compute VLB loss
+        true_mean = posterior_mean
+        true_log_variance = posterior_log_variance
+        
+        kl = normal_kl(true_mean, true_log_variance, x0_pred, model_log_variance)
+        kl = kl.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+        
+        loss = mean_loss + 0.001 * kl
     
-    # Perceptual loss
-    perc_loss = perceptual_loss_3d(x_pred, x_target, weight=perceptual_weight)
-    
-    return noise_loss + perc_loss, noise_loss, perc_loss
+    return loss.mean()
 
 
-# Alias for backward compatibility
-noise_estimation_loss = sg_noise_estimation_loss
+def q_posterior_mean_variance(x_start, x_t, a_t, a_prev):
+    """
+    Compute the mean and variance of the diffusion posterior q(x_{t-1} | x_t, x_0).
+    """
+    posterior_mean = (
+        extract(torch.sqrt(a_prev), t, x_start.shape) * (1.0 - a_t / a_prev) * x_start
+        + extract(torch.sqrt(a_t), t, x_start.shape) * (1.0 - a_prev) / (1.0 - a_t) * x_t
+    )
+    posterior_variance = (1.0 - a_prev) / (1.0 - a_t) * (1.0 - a_t / a_prev)
+    posterior_log_variance = torch.log(posterior_variance.clamp(min=1e-20))
+    
+    return posterior_mean, posterior_variance, posterior_log_variance
+
+
+def extract(a, t, x_shape):
+    """Extract values from a 1D tensor based on indices."""
+    batch_size = t.shape[0]
+    out = a.gather(-1, t.cpu()).to(t.device)
+    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
+
+
+# Backward compatibility
+sg_noise_estimation_loss = fast_ddpm_loss
+noise_estimation_loss = fast_ddpm_loss
