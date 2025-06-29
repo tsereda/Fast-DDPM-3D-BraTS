@@ -5,175 +5,92 @@ metadata:
   labels:
     app: fast-ddpm-brats
 spec:
-  securityContext:
-    fsGroup: 0
   nodeSelector:
     topology.kubernetes.io/region: us-west
+  
   containers:
     - name: brats-processing
       image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp
+      
       env:
         - name: REPO_PATH
           value: /app/Fast-DDPM-3D-BraTS
-        - name: SYNAPSE_AUTHTOKEN
-          valueFrom:
-            secretKeyRef:
-              name: synapse-credentials
-              key: authtoken
-              optional: true
         - name: PYTHONPATH
           value: /app/Fast-DDPM-3D-BraTS
         - name: CUDA_VISIBLE_DEVICES
           value: "0"
-        - name: PYTORCH_CUDA_ALLOC_CONF
-          value: "max_split_size_mb:512"
-        - name: OMP_NUM_THREADS
-          value: "4"
-        - name: MKL_NUM_THREADS
-          value: "4"
+        # nnUNet paths
         - name: nnUNet_raw
           value: /app/nnunet/raw
         - name: nnUNet_preprocessed
           value: /app/nnunet/preprocessed
         - name: nnUNet_results
           value: /app/nnunet/results
-      command: ["/bin/bash"]
+      
+      command: ["/bin/bash", "-c"]
       args:
-        - "-c"
         - |
+          # Clone repository
           git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           
+          # Create directories
           mkdir -p /app/nnunet/{raw,preprocessed,results}
           
-          sudo apt-get update && sudo apt-get install -y p7zip-full wget git vim htop
-          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" ]; then
-            echo "📦 Extracting training data..."
-            cd /data
-            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc) || echo "⚠️ Training data extraction failed"
-            cd ${REPO_PATH}
-            ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
-          else
-            echo "⚠️ Training data not found in /data/"
-          fi
+          # Install dependencies
+          apt-get update && apt-get install -y p7zip-full wget git
           
-          # Extract validation data if available
-          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip" ]; then
-            echo "📦 Extracting validation data..."
-            cd /data
-            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc) || echo "⚠️ Validation data extraction failed"
-            cd ${REPO_PATH}
-            ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData
-          else
-            echo "⚠️ Validation data not found in /data/"
-          fi
+          # Extract datasets if available
+          for dataset in "TrainingData" "ValidationData"; do
+            zip_file="/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}.zip"
+            if [ -f "$zip_file" ]; then
+              echo "Extracting ${dataset}..."
+              cd /data && 7z x "$zip_file" -y
+              cd ${REPO_PATH}
+              ln -sf "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}" .
+            fi
+          done
           
-          # Initialize conda environment
-          echo "🐍 Setting up conda environment..."
-          if eval "$(conda shell.bash hook)" 2>/dev/null; then
-            echo "✓ Conda initialized successfully"
-            conda activate brasyn || echo "⚠️ Could not activate brasyn environment"
-          else
-            echo "⚠️ Conda initialization failed"
-          fi
-          
-          # System checks
-          echo "🔍 Running system checks..."
-          nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null || echo "⚠️ GPU info not available"
-          
-          python -c "
-          import sys
-          print(f'Python: {sys.version}')
-          try:
-              import torch
-              print(f'PyTorch: {torch.__version__}')
-              print(f'CUDA available: {torch.cuda.is_available()}')
-              if torch.cuda.is_available():
-                  print(f'GPU count: {torch.cuda.device_count()}')
-          except ImportError:
-              print('⚠️ PyTorch not available')
-          " 2>/dev/null || echo "⚠️ Python environment check failed"
-          
-          # Convert data to nnUNet format if conditions are met
-          mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
-          if [ "$mem_usage" -lt 70 ] && [ -f "Dataset137_BraTS21.py" ] && [ -d "ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
-            echo "🔄 Converting data to nnUNet format..."
-            python Dataset137_BraTS21.py || echo "⚠️ Data conversion failed"
-          else
-            echo "⚠️ Skipping data conversion (memory: ${mem_usage}%)"
-          fi
-          
-          # Mark setup as complete
-          touch /tmp/setup_complete
-          
-          echo "✅ Setup complete!"
-          echo ""
-          echo "📋 Available commands:"
-          echo "  - Training: python scripts/train_3d.py --data_root ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
-          echo "  - Inference: python scripts/inference_3d.py --help"
-          echo ""
-          echo "📁 Data locations:"
-          echo "  - Training: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData"
-          echo "  - Validation: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData"
-          echo ""
-          echo "🖥️  Connect with: kubectl exec -it tsereda-brats-pod -- /bin/bash"
-          echo ""
-          
+          conda create -n brasyn python=3.11 -y
+          conda activate brasyn
+          pip install pyyaml
+          pip install torch
+          pip install tqdm
+          pip install numpy
+          pip install nibabel
           python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
-
+          
+          # Keep pod running
           tail -f /dev/null
+      
       volumeMounts:
-        - name: git-repo
+        - name: workspace
           mountPath: /app
-        - name: brats-data-volume
+        - name: data
           mountPath: /data
-        - name: dshm
+        - name: shm
           mountPath: /dev/shm
+      
       resources:
-        limits:
-          memory: 32Gi
-          cpu: "16"
-          nvidia.com/gpu: "1"
         requests:
           memory: 28Gi
           cpu: "12"
           nvidia.com/gpu: "1"
-      securityContext:
-        runAsUser: 0
-        capabilities:
-          add:
-            - SYS_NICE
-            - IPC_LOCK
-      livenessProbe:
-        exec:
-          command:
-            - /bin/bash
-            - -c
-            - "ps aux | grep -v grep | grep -q python || ps aux | grep -v grep | grep -q tail"
-        initialDelaySeconds: 600
-        periodSeconds: 60
-        timeoutSeconds: 10
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/bash
-            - -c
-            - "test -f /tmp/setup_complete"
-        initialDelaySeconds: 120
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 20
+        limits:
+          memory: 32Gi
+          cpu: "16"
+          nvidia.com/gpu: "1"
+  
   volumes:
-    - name: git-repo
+    - name: workspace
       emptyDir:
         sizeLimit: 50Gi
-    - name: brats-data-volume
+    - name: data
       persistentVolumeClaim:
         claimName: brats2025-1
-    - name: dshm
+    - name: shm
       emptyDir:
         medium: Memory
         sizeLimit: 16Gi
+  
   restartPolicy: Never
-  terminationGracePeriodSeconds: 60
