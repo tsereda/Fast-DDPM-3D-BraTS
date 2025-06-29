@@ -119,14 +119,9 @@ spec:
           echo "🖥️  Connect with: kubectl exec -it tsereda-brats-pod -- /bin/bash"
           echo ""
           
-          # Start training
-          if [ -d "ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
-            echo "🏃 Starting training..."
-            python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
-          else
-            echo "⚠️ Training data not available, keeping container alive..."
-            tail -f /dev/null
-          fi
+          python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+
+          tail -f /dev/null
       volumeMounts:
         - name: git-repo
           mountPath: /app
