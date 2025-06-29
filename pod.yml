@@ -34,81 +34,196 @@ spec:
           
           echo "🚀 Starting Fast-DDPM-3D-BraTS Setup..."
           
+          # Create checkpoint directory
+          mkdir -p /tmp/setup_checkpoints
+          
           # Update system packages
-          echo "📦 Updating system packages..."
-          sudo apt-get update && sudo apt-get install -y p7zip-full wget git vim htop
+          if [ ! -f "/tmp/setup_checkpoints/packages_updated" ]; then
+            echo "📦 Updating system packages..."
+            sudo apt-get update && sudo apt-get install -y p7zip-full wget git vim htop
+            touch /tmp/setup_checkpoints/packages_updated
+          else
+            echo "✓ System packages already updated"
+          fi
           
           # Clone repository
-          echo "📂 Cloning repository..."
-          if [ ! -d "${REPO_PATH}" ]; then
-            git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          if [ ! -f "/tmp/setup_checkpoints/repo_cloned" ]; then
+            echo "📂 Cloning repository..."
+            if [ ! -d "${REPO_PATH}" ]; then
+              git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+            fi
+            touch /tmp/setup_checkpoints/repo_cloned
+          else
+            echo "✓ Repository already cloned"
           fi
           cd ${REPO_PATH}
           
+          # Check disk usage before data extraction
+          echo "📁 Current disk usage:"
+          echo "  /app: $(du -sh /app 2>/dev/null || echo "N/A")"
+          echo "  /data: $(du -sh /data 2>/dev/null || echo "N/A")"
+          echo "  Available space: $(df -h /app | tail -1 | awk '{print $4}')"
+          
           # Check for data files
           echo "📊 Checking for data files..."
-          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" ]; then
+          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" ] && [ ! -f "/tmp/setup_checkpoints/training_data_extracted" ]; then
             echo "✓ Found training data"
-            cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip .
-            echo "📦 Extracting training data..."
+            echo "📦 Extracting training data directly to /data (no copy)..."
+            cd /data
             7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc) || {
               echo "⚠️ Training data extraction failed, continuing without it"
             }
+            # Create symlink to avoid copying large files
+            cd ${REPO_PATH}
+            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
+              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+            fi
+            touch /tmp/setup_checkpoints/training_data_extracted
+          elif [ -f "/tmp/setup_checkpoints/training_data_extracted" ]; then
+            echo "✓ Training data already extracted"
+            cd ${REPO_PATH}
+            # Ensure symlink exists
+            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ] && [ ! -e "./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
+              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+            fi
           else
             echo "⚠️ Training data not found in /data/"
           fi
           
-          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip" ]; then
+          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip" ] && [ ! -f "/tmp/setup_checkpoints/validation_data_extracted" ]; then
             echo "✓ Found validation data"
-            cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip .
-            echo "📦 Extracting validation data..."
+            echo "📦 Extracting validation data directly to /data (no copy)..."
+            cd /data
             7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc) || {
               echo "⚠️ Validation data extraction failed, continuing without it"
             }
+            # Create symlink to avoid copying large files
+            cd ${REPO_PATH}
+            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData" ]; then
+              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData
+            fi
+            touch /tmp/setup_checkpoints/validation_data_extracted
+          elif [ -f "/tmp/setup_checkpoints/validation_data_extracted" ]; then
+            echo "✓ Validation data already extracted"
+            cd ${REPO_PATH}
+            # Ensure symlink exists
+            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData" ] && [ ! -e "./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData" ]; then
+              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData
+            fi
           else
             echo "⚠️ Validation data not found in /data/"
           fi
           
           # Setup environment
-          echo "🐍 Setting up Python environment..."
-          cd ${REPO_PATH}
-          
-          # Initialize conda
-          eval "$(conda shell.bash hook)"
-          
-          # Check if environment exists
-          if conda env list | grep -q "brasyn"; then
-            echo "✓ Environment brasyn already exists, activating..."
-            conda activate brasyn
-          else
-            echo "🔧 Creating brasyn environment..."
-            if [ -f "environment.yml" ]; then
-              # Try with mamba first, fall back to conda
-              if command -v mamba &> /dev/null; then
-                echo "Using mamba for faster installation..."
-                mamba env create -f environment.yml -y || {
-                  echo "⚠️ Mamba failed, trying conda..."
-                  conda env create -f environment.yml -y
-                }
-              else
-                conda env create -f environment.yml -y
-              fi
-              conda activate brasyn
-            else
-              echo "⚠️ environment.yml not found, creating minimal environment..."
-              conda create -n brasyn python=3.11 -y
-              conda activate brasyn
-              
-              # Install essential packages
-              pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-              pip install numpy nibabel SimpleITK tqdm PyYAML matplotlib scipy pandas opencv-python scikit-image
-              pip install gdown wandb lpips einops accelerate
+          if [ ! -f "/tmp/setup_checkpoints/environment_setup" ]; then
+            echo "🐍 Setting up Python environment..."
+            cd ${REPO_PATH}
+            
+            # Add error handling for container runtime issues
+            echo "🔍 Checking container runtime..."
+            if ! command -v conda &> /dev/null; then
+              echo "❌ Conda not found, installing miniconda..."
+              wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+              bash miniconda.sh -b -p /opt/miniconda
+              export PATH="/opt/miniconda/bin:$PATH"
+              rm miniconda.sh
             fi
+            
+            # Initialize conda with retry mechanism
+            echo "🔄 Initializing conda..."
+            for i in {1..3}; do
+              if eval "$(conda shell.bash hook)" 2>/dev/null; then
+                echo "✓ Conda initialized successfully"
+                break
+              else
+                echo "⚠️ Conda initialization attempt $i failed, retrying..."
+                sleep 5
+              fi
+            done
+            
+            # Check if environment exists with retry
+            echo "🔍 Checking for existing environment..."
+            if conda env list | grep -q "brasyn" 2>/dev/null; then
+              echo "✓ Environment brasyn already exists, activating..."
+              conda activate brasyn || {
+                echo "⚠️ Failed to activate existing environment, recreating..."
+                conda env remove -n brasyn -y 2>/dev/null || true
+              }
+            fi
+            
+            # Create environment if it doesn't exist or activation failed
+            if ! conda env list | grep -q "brasyn" 2>/dev/null; then
+              echo "🔧 Creating brasyn environment..."
+              if [ -f "environment.yml" ]; then
+                # Try with mamba first, fall back to conda
+                if command -v mamba &> /dev/null; then
+                  echo "Using mamba for faster installation..."
+                  timeout 900 mamba env create -f environment.yml -y || {
+                    echo "⚠️ Mamba failed or timed out, trying conda..."
+                    timeout 1200 conda env create -f environment.yml -y || {
+                      echo "❌ Environment creation failed, creating minimal environment..."
+                      conda create -n brasyn python=3.11 -y
+                    }
+                  }
+                else
+                  echo "Using conda for environment creation..."
+                  timeout 1200 conda env create -f environment.yml -y || {
+                    echo "❌ Environment creation failed, creating minimal environment..."
+                    conda create -n brasyn python=3.11 -y
+                  }
+                fi
+              else
+                echo "⚠️ environment.yml not found, creating minimal environment..."
+                conda create -n brasyn python=3.11 -y
+              fi
+              
+              # Activate the newly created environment
+              conda activate brasyn || {
+                echo "❌ Failed to activate environment, using base environment"
+                export CONDA_DEFAULT_ENV=base
+              }
+            fi
+              
+            # Install essential packages with retries
+            echo "📦 Installing essential packages..."
+            for package_group in \
+              "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118" \
+              "numpy nibabel SimpleITK tqdm PyYAML matplotlib scipy pandas" \
+              "opencv-python scikit-image gdown wandb lpips einops accelerate"; do
+              
+              echo "Installing: $package_group"
+              for attempt in {1..3}; do
+                if pip install $package_group --no-cache-dir; then
+                  echo "✓ Successfully installed: $package_group"
+                  break
+                else
+                  echo "⚠️ Attempt $attempt failed for: $package_group"
+                  if [ $attempt -eq 3 ]; then
+                    echo "❌ Failed to install: $package_group (continuing anyway)"
+                  else
+                    sleep 10
+                  fi
+                fi
+              done
+            done
+            
+            touch /tmp/setup_checkpoints/environment_setup
+          else
+            echo "✓ Python environment already set up"
+            cd ${REPO_PATH}
+            eval "$(conda shell.bash hook)" 2>/dev/null || true
+            conda activate brasyn 2>/dev/null || true
           fi
           
-          # Verify environment
-          echo "🔍 Verifying environment..."
-          python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')"
+          # Verify environment and system health
+          echo "🔍 Verifying environment and system health..."
+          echo "💾 Memory usage: $(free -h | grep Mem)"
+          echo "💻 CPU usage: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')"
+          echo "🖥️  GPU info:"
+          nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null || echo "⚠️ GPU info not available"
+          
+          # Test Python environment
+          python -c "import sys; print(f'Python: {sys.version}'); import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}') if torch.cuda.is_available() else None" 2>/dev/null || echo "⚠️ Python environment check failed"
           
           # Run basic tests
           echo "🧪 Running basic tests..."
@@ -141,12 +256,22 @@ spec:
           echo "✅ Setup complete!"
           echo "📋 Available commands:"
           echo "  - Training: python scripts/train_3d.py --data_root ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
+          echo "  - Training (alt): python scripts/train_3d.py --data_root /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
           echo "  - Inference: python scripts/inference_3d.py --help"
           echo "  - Environment check: python verify_environment.py"
+          echo ""
+          echo "📁 Data locations:"
+          echo "  - Training data: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData"
+          echo "  - Validation data: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData"
+          echo "  - Symlinks in repo: $(ls -la ${REPO_PATH}/ | grep ^l || echo 'None')"
           echo ""
           echo "🖥️  Container will stay alive. Connect with:"
           echo "    kubectl exec -it tsereda-brats-pod -- /bin/bash"
           echo ""
+          echo "📊 Final system status:"
+          echo "💾 Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "💻 Load: $(uptime | awk -F'load average:' '{print $2}')"
+          echo "📁 Disk usage: $(df -h /app | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
           
           # Mark setup as complete for readiness probe
           touch /tmp/setup_complete
@@ -199,7 +324,7 @@ spec:
   volumes:
     - name: git-repo
       emptyDir:
-        sizeLimit: 20Gi
+        sizeLimit: 50Gi  # Increased from 20Gi to handle any temporary files
     - name: brats-data-volume
       persistentVolumeClaim:
         claimName: brats2025-1
