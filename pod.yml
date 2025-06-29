@@ -42,7 +42,7 @@ spec:
           mkdir -p /app/nnunet/{raw,preprocessed,results}
           
           # Install dependencies
-          apt-get update && apt-get install -y p7zip-full wget git
+          sudo apt-get update && sudo apt-get install -y p7zip-full wget git
           
           # Extract datasets if available
           for dataset in "TrainingData" "ValidationData"; do
@@ -60,7 +60,7 @@ spec:
           pip install tqdm
           pip install numpy
           pip install nibabel
-          python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData 2>&1 | tee -a /app/training.log
+          PYTHONUNBUFFERED=1 python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
           
           # Keep pod running
           tail -f /dev/null

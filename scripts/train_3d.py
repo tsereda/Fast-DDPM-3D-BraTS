@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument('--resume', action='store_true', help='Resume training')
     parser.add_argument('--resume_path', type=str, help='Path to checkpoint to resume from')
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
+    parser.add_argument('--log_every_n_steps', type=int, default=50, help='Log training progress every N steps')
+
     return parser.parse_args()
 
 def dict2namespace(config):
@@ -382,6 +384,12 @@ def main():
                 scaler.update()
                 
                 epoch_loss += loss.item()
+                if (batch_idx + 1) % args.log_every_n_steps == 0: # Use args.log_every_n_steps
+                        logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
+                            f'Batch {batch_idx+1}/{len(train_loader)} - '
+                            f'Step Loss: {loss.item():.6f}, '
+                            f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
+
                 pbar.set_postfix({
                     'loss': f'{loss.item():.6f}',
                     'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
