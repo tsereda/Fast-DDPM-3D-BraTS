@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tsereda-brats-pod
+spec:
+  nodeSelector:
+    topology.kubernetes.io/region: us-west
+  containers:
+    - name: brats-processing
+      image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp
+      env:
+        - name: REPO_PATH
+          value: /app/BraSyn_tutorial
+        - name: SYNAPSE_AUTHTOKEN
+          valueFrom:
+            secretKeyRef:
+              name: synapse-credentials
+              key: authtoken
+      command:
+        - "bash"
+        - "-c"
+      args:
+        - |
+          sudo apt-get update && sudo apt-get install -y p7zip-full wget
+          
+          #pip install synapseclient
+          #synapse config
+          #synapse get -r syn51514105 
+          
+          git clone https://github.com/tsereda/BraSyn_tutorial.git ${REPO_PATH}
+          cd ${REPO_PATH}
+          cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip .
+          cp /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip .
+          7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc)
+          7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc)
+          source /opt/conda/etc/profile.d/mamba.sh
+          mamba create -n brasyn python=3.10 -y
+          mamba activate brasyn
+          pip install -r project/requirements.txt
+          pip install nnunetv2 gdown simpleitk numpy batchgenerators
+          
+          python drop_modality.py
+          python project/generate_missing_modality.py
+
+          export nnUNet_raw="/app/nnunet/raw"
+          export nnUNet_preprocessed="/app/nnunet/preprocessed"
+          export nnUNet_results="/app/nnunet/results"
+
+          mkdir -p /app/nnunet/{raw,preprocessed,results}
+
+          echo "Downloading pre-trained nnUNet weights, dataset.json, and plan.json..."
+          gdown 1n9dqT114udr9Qq8iYEKsJK347iHg9N88
+          gdown 1A_suxQwElucF3w1HEYg3wMo6dG9OxBHo
+          gdown 1U2b0BTNi8zrJACReoi_W08Fe-wM394wI
+
+          echo "Downloaded files:"
+          ls -la *.pth *.json
+
+          echo "Setting up nnUNet model structure..."
+          mkdir -p $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_5/
+          
+          # Move files to correct locations (assuming the downloaded files have these names)
+          mv checkpoint_best.pth $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_5/checkpoint_final.pth
+          mv dataset.json $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/
+          mv plans.json $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/
+
+          echo "Converting data to nnUNet format..."
+          python Dataset137_BraTS21.py
+
+          ln -s $(pwd)/Dataset137_BraTS2021_test $nnUNet_raw/Dataset137_BraTS2021
+
+          # obtain the predicted segmentation maps.
+          nnUNetv2_predict -i "$nnUNet_raw/Dataset137_BraTS2021/imagesTr" -o "./outputs" -d 137 -c 3d_fullres -f 5
+
+          python cal_avg_dice.py
+          
+          sleep infinity
+      volumeMounts:
+        - name: git-repo
+          mountPath: /app
+        - name: brats-data-volume
+          mountPath: /data
+        - name: dshm
+          mountPath: /dev/shm
+      resources:
+        limits:
+          memory: 24Gi
+          cpu: "12"
+          nvidia.com/gpu: "1"
+        requests:
+          memory: 20Gi
+          cpu: "10"
+          nvidia.com/gpu: "1"
+  volumes:
+    - name: git-repo
+      emptyDir: {}
+    - name: brats-data-volume
+      persistentVolumeClaim:
+        claimName: brats2025-1
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Gi
+  restartPolicy: Never

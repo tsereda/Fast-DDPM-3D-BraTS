@@ -1,0 +1,93 @@
+# Improved 3D Fast-DDPM configuration for BraTS
+# Optimized for memory efficiency and training stability
+
+model:
+  type: "sg"  # Score-based generative model
+  in_channels: 4  # 4 BraTS modalities (unified 4→4)
+  out_ch: 1  # 1 target modality
+  ch: 64  # Base channels - can increase to 128 for better quality
+  ch_mult: [1, 2, 4, 8]  # Channel multipliers - adjusted for 3D
+  num_res_blocks: 2  # ResNet blocks per level
+  attn_resolutions: [8, 16]  # Attention at these resolutions
+  dropout: 0.1
+  var_type: fixedsmall
+  ema_rate: 0.999
+  ema: true
+  resamp_with_conv: true
+  
+diffusion:
+  beta_schedule: "linear"  # or "cosine"
+  beta_start: 1e-4
+  beta_end: 2e-2
+  num_diffusion_timesteps: 1000  # Standard DDPM
+  loss_type: "l2"
+  
+training:
+  batch_size: 1  # Must be 1 for large 3D volumes
+  learning_rate: 1e-4
+  weight_decay: 1e-6
+  epochs: 100
+  gradient_clip: 1.0
+  
+  # Checkpointing
+  save_every: 1000  # Save checkpoint every N steps
+  validate_every: 500  # Validate every N steps
+  
+  # Memory optimization
+  mixed_precision: true
+  gradient_checkpointing: true
+
+data:
+  volume_size: [96, 96, 96]  # Start with 96³, scale up gradually
+  normalize: true
+  num_workers: 4
+  
+  # Data augmentation
+  augmentation:
+    rotation: true
+    flip: true
+    elastic: false  # Disable for memory
+    color_jitter: true
+    
+  # Unified 4→4 training parameters
+  min_input_modalities: 1
+  max_input_modalities: 3
+  
+# Progressive training (optional)
+progressive:
+  enabled: false  # Set to true for progressive training
+  start_size: [64, 64, 64]
+  target_size: [144, 192, 192]
+  grow_every: 20  # epochs
+  
+# Optimization settings
+optim:
+  lr: 1e-4
+  beta1: 0.9
+  weight_decay: 1e-6
+  
+# Evaluation
+eval:
+  # Metrics to compute during validation
+  compute_ssim: true
+  compute_psnr: true
+  compute_lpips: false  # 3D LPIPS not available
+  
+# Memory estimates (approximate):
+# 64³ × batch_size=1: ~6GB VRAM
+# 96³ × batch_size=1: ~12GB VRAM  
+# 128³ × batch_size=1: ~20GB VRAM
+# 144×192×192 × batch_size=1: ~24GB VRAM
+
+# Recommended hardware:
+# - RTX 3090/4090 (24GB): volume_size=[96,96,96] or [128,128,128]
+# - RTX 3080 (10GB): volume_size=[64,64,64] or [80,80,80]
+# - RTX 4080 (16GB): volume_size=[96,96,96]
+
+# what ill be running this on, update and remove the above
+
+# RTX  2090 S
+# T4
+# A100
+
+#dont worry about multi gpu rn
