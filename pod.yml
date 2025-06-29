@@ -31,316 +31,102 @@ spec:
           value: "4"
         - name: MKL_NUM_THREADS
           value: "4"
-      command:
-        - "bash"
-        - "-c"
+        - name: nnUNet_raw
+          value: /app/nnunet/raw
+        - name: nnUNet_preprocessed
+          value: /app/nnunet/preprocessed
+        - name: nnUNet_results
+          value: /app/nnunet/results
+      command: ["/bin/bash"]
       args:
+        - "-c"
         - |
-          set -e  # Exit on any error
-          
-          # Memory monitoring function
-          monitor_memory() {
-            local step="$1"
-            echo "💾 Memory at $step: $(free -h | grep Mem | awk '{print "Used: "$3"/"$2" ("$3/$2*100"%)"}') "
-            # Kill process if memory usage is too high (>85% for 32GB limit)
-            local mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
-            if [ "$mem_usage" -gt 85 ]; then
-              echo "⚠️ Memory usage critical: ${mem_usage}% - forcing aggressive cleanup"
-              # Clear all possible caches
-              sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-              python -c "import gc; gc.collect()" 2>/dev/null || true
-              # Clear pip cache
-              pip cache purge 2>/dev/null || true
-              # Clear conda cache
-              conda clean --all -y 2>/dev/null || true
-            fi
-          }
-          
-          echo "🚀 Starting Fast-DDPM-3D-BraTS Setup..."
-          monitor_memory "startup"
-          
-          # Create checkpoint directory
-          mkdir -p /tmp/setup_checkpoints
-          
-          # Update system packages
-          if [ ! -f "/tmp/setup_checkpoints/packages_updated" ]; then
-            echo "📦 Updating system packages..."
-            monitor_memory "before package update"
-            sudo apt-get update && sudo apt-get install -y p7zip-full wget git vim htop
-            touch /tmp/setup_checkpoints/packages_updated
-            monitor_memory "after package update"
-          else
-            echo "✓ System packages already updated"
-          fi
-          
-          # Clone repository
-          if [ ! -f "/tmp/setup_checkpoints/repo_cloned" ]; then
-            echo "📂 Cloning repository..."
-            if [ ! -d "${REPO_PATH}" ]; then
-              git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
-            fi
-            touch /tmp/setup_checkpoints/repo_cloned
-          else
-            echo "✓ Repository already cloned"
-          fi
+          git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           
-          # Check disk usage before data extraction
-          echo "📁 Current disk usage:"
-          echo "  /app: $(du -sh /app 2>/dev/null || echo "N/A")"
-          echo "  /data: $(du -sh /data 2>/dev/null || echo "N/A")"
-          echo "  Available space: $(df -h /app | tail -1 | awk '{print $4}')"
+          mkdir -p /app/nnunet/{raw,preprocessed,results}
           
-          # Check for data files
-          echo "📊 Checking for data files..."
-          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" ] && [ ! -f "/tmp/setup_checkpoints/training_data_extracted" ]; then
-            echo "✓ Found training data"
-            echo "📦 Extracting training data directly to /data (no copy)..."
+          sudo apt-get update && sudo apt-get install -y p7zip-full wget git vim htop
+          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip" ]; then
+            echo "📦 Extracting training data..."
             cd /data
-            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc) || {
-              echo "⚠️ Training data extraction failed, continuing without it"
-            }
-            # Create symlink to avoid copying large files
+            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData.zip -y -mmt=$(nproc) || echo "⚠️ Training data extraction failed"
             cd ${REPO_PATH}
-            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
-              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
-            fi
-            touch /tmp/setup_checkpoints/training_data_extracted
-          elif [ -f "/tmp/setup_checkpoints/training_data_extracted" ]; then
-            echo "✓ Training data already extracted"
-            cd ${REPO_PATH}
-            # Ensure symlink exists
-            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ] && [ ! -e "./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
-              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
-            fi
+            ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
           else
             echo "⚠️ Training data not found in /data/"
           fi
           
-          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip" ] && [ ! -f "/tmp/setup_checkpoints/validation_data_extracted" ]; then
-            echo "✓ Found validation data"
-            echo "📦 Extracting validation data directly to /data (no copy)..."
+          # Extract validation data if available
+          if [ -f "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip" ]; then
+            echo "📦 Extracting validation data..."
             cd /data
-            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc) || {
-              echo "⚠️ Validation data extraction failed, continuing without it"
-            }
-            # Create symlink to avoid copying large files
+            7z x ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData.zip -y -mmt=$(nproc) || echo "⚠️ Validation data extraction failed"
             cd ${REPO_PATH}
-            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData" ]; then
-              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData
-            fi
-            touch /tmp/setup_checkpoints/validation_data_extracted
-          elif [ -f "/tmp/setup_checkpoints/validation_data_extracted" ]; then
-            echo "✓ Validation data already extracted"
-            cd ${REPO_PATH}
-            # Ensure symlink exists
-            if [ -d "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData" ] && [ ! -e "./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData" ]; then
-              ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData
-            fi
+            ln -sf /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData ./ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData
           else
             echo "⚠️ Validation data not found in /data/"
           fi
           
-          # Setup environment
-          if [ ! -f "/tmp/setup_checkpoints/environment_setup" ]; then
-            echo "🐍 Setting up Python environment..."
-            echo "💾 Memory before environment setup: $(free -h | grep Mem)"
-            cd ${REPO_PATH}
-            
-            # Add error handling for container runtime issues
-            echo "🔍 Checking container runtime..."
-            if ! command -v conda &> /dev/null; then
-              echo "❌ Conda not found, installing miniconda..."
-              wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-              bash miniconda.sh -b -p /opt/miniconda
-              export PATH="/opt/miniconda/bin:$PATH"
-              rm miniconda.sh
-            fi
-            
-            # Initialize conda with retry mechanism
-            echo "🔄 Initializing conda..."
-            for i in {1..3}; do
-              if eval "$(conda shell.bash hook)" 2>/dev/null; then
-                echo "✓ Conda initialized successfully"
-                break
-              else
-                echo "⚠️ Conda initialization attempt $i failed, retrying..."
-                sleep 5
-              fi
-            done
-            
-            # Check if environment exists with retry
-            echo "🔍 Checking for existing environment..."
-            if conda env list | grep -q "brasyn" 2>/dev/null; then
-              echo "✓ Environment brasyn already exists, activating..."
-              conda activate brasyn || {
-                echo "⚠️ Failed to activate existing environment, recreating..."
-                conda env remove -n brasyn -y 2>/dev/null || true
-              }
-            fi
-            
-            # Create environment if it doesn't exist or activation failed
-            if ! conda env list | grep -q "brasyn" 2>/dev/null; then
-              echo "🔧 Creating brasyn environment..."
-              if [ -f "environment.yml" ]; then
-                # Try with conda with memory optimization - create minimal environment instead
-                echo "Creating minimal environment due to memory constraints..."
-                conda create -n brasyn python=3.11 -y
-                conda activate brasyn
-                # Install only essential packages for minimal environment
-                pip install torch --index-url https://download.pytorch.org/whl/cu118 --no-cache-dir
-                pip install numpy nibabel tqdm --no-cache-dir
-              else
-                echo "⚠️ environment.yml not found, creating minimal environment..."
-                conda create -n brasyn python=3.11 -y
-              fi
-              
-              # Activate the newly created environment
-              conda activate brasyn || {
-                echo "❌ Failed to activate environment, using base environment"
-                export CONDA_DEFAULT_ENV=base
-              }
-            fi
-              
-            # Install essential packages with retries and memory optimization
-            echo "📦 Installing essential packages with aggressive memory management..."
-            
-            # Set pip cache to /tmp to avoid disk space issues
-            export PIP_CACHE_DIR=/tmp/pip-cache
-            mkdir -p $PIP_CACHE_DIR
-            
-            # Install packages one by one with very conservative approach
-            declare -a essential_packages=(
-              "SimpleITK"
-              "PyYAML"
-              "matplotlib"
-              "scipy"
-              "pandas"
-              "opencv-python"
-              "scikit-image"
-            )
-            
-            declare -a optional_packages=(
-              "gdown"
-              "wandb"
-              "lpips"
-              "einops"
-              "accelerate"
-            )
-            
-            # Install essential packages first
-            for package in "${essential_packages[@]}"; do
-              echo "Installing essential: $package"
-              for attempt in {1..2}; do
-                # Clear caches before each attempt
-                rm -rf $PIP_CACHE_DIR/*
-                pip cache purge 2>/dev/null || true
-                python -c "import gc; gc.collect()" 2>/dev/null || true
-                
-                if timeout 300 pip install $package --no-cache-dir --timeout 180; then
-                  echo "✓ Successfully installed: $package"
-                  break
-                else
-                  echo "⚠️ Attempt $attempt failed for: $package"
-                  if [ $attempt -eq 2 ]; then
-                    echo "❌ Failed to install: $package (continuing anyway)"
-                  fi
-                fi
-              done
-              
-              # Check memory after each package
-              monitor_memory "after installing $package"
-              sleep 3
-            done
-            
-            # Install optional packages only if memory allows
-            mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
-            if [ "$mem_usage" -lt 75 ]; then
-              echo "📦 Installing optional packages..."
-              for package in "${optional_packages[@]}"; do
-                echo "Installing optional: $package"
-                # Single attempt for optional packages
-                if timeout 300 pip install $package --no-cache-dir --timeout 180; then
-                  echo "✓ Successfully installed: $package"
-                else
-                  echo "⚠️ Failed to install optional package: $package (skipping)"
-                fi
-                monitor_memory "after installing optional $package"
-                sleep 2
-              done
-            else
-              echo "⚠️ Skipping optional packages due to memory constraints (${mem_usage}%)"
-            fi
-            
-            # Final cleanup
-            rm -rf $PIP_CACHE_DIR
-            pip cache purge 2>/dev/null || true
-            conda clean --all -y 2>/dev/null || true
-            python -c "import gc; gc.collect()" 2>/dev/null || true
-            monitor_memory "after all package installation"
-            
-            touch /tmp/setup_checkpoints/environment_setup
-            monitor_memory "environment setup complete"
+          # Initialize conda environment
+          echo "🐍 Setting up conda environment..."
+          if eval "$(conda shell.bash hook)" 2>/dev/null; then
+            echo "✓ Conda initialized successfully"
+            conda activate brasyn || echo "⚠️ Could not activate brasyn environment"
           else
-            echo "✓ Python environment already set up"
-            cd ${REPO_PATH}
-            eval "$(conda shell.bash hook)" 2>/dev/null || true
-            conda activate brasyn 2>/dev/null || true
+            echo "⚠️ Conda initialization failed"
           fi
           
-          # Verify environment and system health
-          echo "🔍 Verifying environment and system health..."
-          echo "💾 Memory usage: $(free -h | grep Mem)"
-          echo "💻 CPU usage: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')"
-          echo "🖥️  GPU info:"
+          # System checks
+          echo "🔍 Running system checks..."
           nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null || echo "⚠️ GPU info not available"
           
-          # Test Python environment
-          python -c "import sys; print(f'Python: {sys.version}'); import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}') if torch.cuda.is_available() else None" 2>/dev/null || echo "⚠️ Python environment check failed"
+          python -c "
+          import sys
+          print(f'Python: {sys.version}')
+          try:
+              import torch
+              print(f'PyTorch: {torch.__version__}')
+              print(f'CUDA available: {torch.cuda.is_available()}')
+              if torch.cuda.is_available():
+                  print(f'GPU count: {torch.cuda.device_count()}')
+          except ImportError:
+              print('⚠️ PyTorch not available')
+          " 2>/dev/null || echo "⚠️ Python environment check failed"
           
-          python test.py
-          
-          # Setup nnUNet directories if needed
-          export nnUNet_raw="/app/nnunet/raw"
-          export nnUNet_preprocessed="/app/nnunet/preprocessed" 
-          export nnUNet_results="/app/nnunet/results"
-          mkdir -p /app/nnunet/{raw,preprocessed,results}
-          
-          # Convert data to nnUNet format if script exists (skip if memory is low)
+          # Convert data to nnUNet format if conditions are met
           mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
           if [ "$mem_usage" -lt 70 ] && [ -f "Dataset137_BraTS21.py" ] && [ -d "ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
             echo "🔄 Converting data to nnUNet format..."
-            python Dataset137_BraTS21.py || echo "⚠️ Data conversion failed, continuing..."
+            python Dataset137_BraTS21.py || echo "⚠️ Data conversion failed"
           else
-            echo "⚠️ Skipping data conversion due to memory constraints or missing files"
+            echo "⚠️ Skipping data conversion (memory: ${mem_usage}%)"
           fi
           
-          echo "✅ Setup complete!"
-          echo "📋 Available commands:"
-          echo "  - Training: python scripts/train_3d.py --data_root ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
-          echo "  - Training (alt): python scripts/train_3d.py --data_root /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
-          echo "  - Inference: python scripts/inference_3d.py --help"
-          echo "  - Environment check: python verify_environment.py"
-          echo ""
-          echo "📁 Data locations:"
-          echo "  - Training data: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData"
-          echo "  - Validation data: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData"
-          echo "  - Symlinks in repo: $(ls -la ${REPO_PATH}/ | grep ^l || echo 'None')"
-          echo ""
-          echo "🖥️  Container will stay alive. Connect with:"
-          echo "    kubectl exec -it tsereda-brats-pod -- /bin/bash"
-          echo ""
-          echo "📊 Final system status:"
-          echo "💾 Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "💻 Load: $(uptime | awk -F'load average:' '{print $2}')"
-          echo "📁 Disk usage: $(df -h /app | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
-          python scripts/train_3d.py  --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
-          
-          # Mark setup as complete for readiness probe
+          # Mark setup as complete
           touch /tmp/setup_complete
           
-          # Keep container running
-          tail -f /dev/null
+          echo "✅ Setup complete!"
+          echo ""
+          echo "📋 Available commands:"
+          echo "  - Training: python scripts/train_3d.py --data_root ./ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData --debug"
+          echo "  - Inference: python scripts/inference_3d.py --help"
+          echo ""
+          echo "📁 Data locations:"
+          echo "  - Training: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData"
+          echo "  - Validation: /data/ASNR-MICCAI-BraTS2023-GLI-Challenge-ValidationData"
+          echo ""
+          echo "🖥️  Connect with: kubectl exec -it tsereda-brats-pod -- /bin/bash"
+          echo ""
+          
+          # Start training
+          if [ -d "ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData" ]; then
+            echo "🏃 Starting training..."
+            python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+          else
+            echo "⚠️ Training data not available, keeping container alive..."
+            tail -f /dev/null
+          fi
       volumeMounts:
         - name: git-repo
           mountPath: /app
@@ -350,11 +136,11 @@ spec:
           mountPath: /dev/shm
       resources:
         limits:
-          memory: 32Gi  # Maximum allowed for pods without controllers
+          memory: 32Gi
           cpu: "16"
           nvidia.com/gpu: "1"
         requests:
-          memory: 28Gi  # Slightly under limit for safety
+          memory: 28Gi
           cpu: "12"
           nvidia.com/gpu: "1"
       securityContext:
@@ -363,14 +149,13 @@ spec:
           add:
             - SYS_NICE
             - IPC_LOCK
-      # Add liveness and readiness probes for better pod management
       livenessProbe:
         exec:
           command:
             - /bin/bash
             - -c
-            - "ps aux | grep -v grep | grep -q tail || exit 1"
-        initialDelaySeconds: 600  # Increased from 300s to 10 minutes
+            - "ps aux | grep -v grep | grep -q python || ps aux | grep -v grep | grep -q tail"
+        initialDelaySeconds: 600
         periodSeconds: 60
         timeoutSeconds: 10
         failureThreshold: 3
@@ -380,14 +165,14 @@ spec:
             - /bin/bash
             - -c
             - "test -f /tmp/setup_complete"
-        initialDelaySeconds: 120  # Increased from 60s to 2 minutes
+        initialDelaySeconds: 120
         periodSeconds: 30
         timeoutSeconds: 5
-        failureThreshold: 20  # Increased from 10 to 20
+        failureThreshold: 20
   volumes:
     - name: git-repo
       emptyDir:
-        sizeLimit: 50Gi  # Increased from 20Gi to handle any temporary files
+        sizeLimit: 50Gi
     - name: brats-data-volume
       persistentVolumeClaim:
         claimName: brats2025-1
@@ -396,4 +181,4 @@ spec:
         medium: Memory
         sizeLimit: 16Gi
   restartPolicy: Never
-  terminationGracePeriodSeconds: 60  # Increased from 30
+  terminationGracePeriodSeconds: 60
