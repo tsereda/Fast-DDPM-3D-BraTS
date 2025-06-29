@@ -1,118 +1,125 @@
-# Optimized Fast-DDPM 3D configuration with variance learning
-# Memory-efficient settings for 10.6GB GPU
-
 model:
-  type: "fast_ddpm"  # Full Fast-DDPM with variance learning
-  in_channels: 4  # 4 BraTS modalities (unified 4→4)
-  out_ch: 1  # 1 target modality 
-  ch: 48  # Reduced base channels for memory efficiency
-  ch_mult: [1, 2, 4, 8]  # Channel multipliers
-  num_res_blocks: 2  # ResNet blocks per level
-  attn_resolutions: [16]  # Only attention at 16x16x16 for memory
+  type: fast_ddpm
+  in_channels: 4
+  out_ch: 1
+  ch: 48
+  ch_mult:
+  - 1
+  - 2
+  - 4
+  - 8
+  num_res_blocks: 2
+  attn_resolutions:
+  - 16
   dropout: 0.1
-  var_type: "learned_range"  # Fast-DDPM variance learning: 'fixed', 'learned', or 'learned_range'
+  var_type: learned_range
   ema_rate: 0.9999
   ema: true
   resamp_with_conv: true
-  
 diffusion:
-  beta_schedule: "cosine"  # Better than linear for Fast-DDPM
+  beta_schedule: cosine
   beta_start: 0.0001
   beta_end: 0.02
   num_diffusion_timesteps: 1000
-  loss_type: "hybrid"  # Combined MSE + VLB
-  
-  # Fast-DDPM specific
-  sampling_timesteps: 10  # Fast sampling with only 10 steps
-  sampling_scheduler: "non-uniform"  # Optimized schedule
+  loss_type: hybrid
+  sampling_timesteps: 10
+  sampling_scheduler: non-uniform
   clip_denoised: true
-  
 training:
-  batch_size: 1  # Must be 1 for 3D volumes
+  batch_size: 1
   learning_rate: 0.0001
   weight_decay: 0
   epochs: 100
   gradient_clip: 1.0
-  
-  # Optimization
-  optimizer: "adamw"
+  optimizer: adamw
   beta1: 0.9
   beta2: 0.999
   warmup_steps: 1000
-  
-  # Learning rate schedule
-  lr_scheduler: "cosine"
+  lr_scheduler: cosine
   lr_min: 1e-6
-  
-  # Checkpointing
   save_every: 1000
   validate_every: 500
   log_every: 100
-  
-  # Memory optimization
   mixed_precision: true
   gradient_checkpointing: true
-  accumulate_grad_batches: 4  # Effective batch size of 4
-
+  accumulate_grad_batches: 4
 data:
-  # UPDATED: Reduced volume size for 10.6GB GPU
-  volume_size: [80, 80, 80]  # Changed from [96, 96, 96]
-  
-  # Volume sizes for different GPUs (reference)
+  volume_size:
+  - 80
+  - 80
+  - 80
   volume_sizes:
-    # GPU memory -> volume size
-    "8GB": [64, 64, 64]
-    "11GB": [80, 80, 80]  # Your GPU falls here (10.6GB)
-    "16GB": [96, 96, 96]  # T4, V100 16GB
-    "24GB": [112, 112, 112]  # RTX 3090, RTX 4090
-    "32GB": [128, 128, 128]  # V100 32GB
-    "40GB": [144, 144, 144]  # A100
-    "80GB": [160, 160, 160]  # A100 80GB
-  
-  # Data settings
+    8GB:
+    - 64
+    - 64
+    - 64
+    11GB:
+    - 80
+    - 80
+    - 80
+    16GB:
+    - 96
+    - 96
+    - 96
+    24GB:
+    - 112
+    - 112
+    - 112
+    32GB:
+    - 128
+    - 128
+    - 128
+    40GB:
+    - 144
+    - 144
+    - 144
+    80GB:
+    - 160
+    - 160
+    - 160
   normalize: true
   num_workers: 4
   pin_memory: true
   prefetch_factor: 2
-  
-  # Augmentation
   augmentation:
     rotation: true
-    rotation_angles: [-10, 10]  # degrees
+    rotation_angles:
+    - -10
+    - 10
     flip: true
     flip_prob: 0.5
-    elastic: false  # Disabled for memory
+    elastic: false
     color_jitter: true
-    brightness: [0.9, 1.1]
-    contrast: [0.9, 1.1]
-    
-  # Unified 4→4 training
+    brightness:
+    - 0.9
+    - 1.1
+    contrast:
+    - 0.9
+    - 1.1
   min_input_modalities: 1
   max_input_modalities: 3
-  
-# Memory optimization strategies
 memory_optimization:
-  # Gradient accumulation steps (simulates larger batch)
   gradient_accumulation_steps: 4
-  
-  # Activation checkpointing layers
-  checkpoint_layers: ["mid", "up.0", "up.1"]
-  
-  # CPU offload for optimizer states (for very large models)
+  checkpoint_layers:
+  - mid
+  - up.0
+  - up.1
   cpu_offload: false
-  
-  # Clear cache periodically
   clear_cache_every: 100
-
-# Logging and monitoring
 logging:
-  use_wandb: false  # Set to true to use Weights & Biases
-  project_name: "fast-ddpm-3d-brats"
+  use_wandb: false
+  project_name: fast-ddpm-3d-brats
   log_images_every: 1000
-  log_metrics: ["loss", "mse", "vlb", "grad_norm"]
-  
-# Evaluation metrics
+  log_metrics:
+  - loss
+  - mse
+  - vlb
+  - grad_norm
 evaluation:
-  metrics: ["mse", "psnr", "ssim", "lpips_3d"]
+  metrics:
+  - mse
+  - psnr
+  - ssim
+  - lpips_3d
   save_samples: true
   num_samples: 5
