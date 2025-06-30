@@ -30,21 +30,29 @@ spec:
           value: "1"
         - name: PYTHONIOENCODING
           value: "UTF-8"
+        # W&B configuration
+        - name: WANDB_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wandb-credentials
+              key: api-key  # Adjust this key name to match your secret
+        - name: WANDB_PROJECT
+          value: "fast-ddpm-3d-brats"
+        - name: WANDB_ENTITY
+          value: "tsereda"  # Replace with your W&B username/team
+        - name: WANDB_MODE
+          value: "online"  # Change to "offline" if needed
       
       command: ["/bin/bash", "-c"]
       args:
         - |
-          # Clone repository
           git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           
-          # Create directories
           mkdir -p /app/nnunet/{raw,preprocessed,results}
           
-          # Install dependencies
           sudo apt-get update && sudo apt-get install -y p7zip-full wget git
           
-          # Extract datasets if available
           for dataset in "TrainingData" "ValidationData"; do
             zip_file="/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}.zip"
             if [ -f "$zip_file" ]; then
@@ -55,14 +63,19 @@ spec:
             fi
           done
           
-          pip install pyyaml
-          pip install torch
-          pip install tqdm
-          pip install numpy
-          pip install nibabel
-          PYTHONUNBUFFERED=1 python scripts/train_3d.py --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData
+          pip install pyyaml torch tqdm numpy nibabel wandb
           
-          # Keep pod running
+          echo "Checking W&B configuration..."
+          python -c "import wandb; print(f'W&B version: {wandb.__version__}')"
+          
+          echo "Starting training with W&B logging..."
+          PYTHONUNBUFFERED=1 python scripts/train_3d.py \
+            --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
+            --use_wandb \
+            --wandb_project ${WANDB_PROJECT} \
+            --wandb_entity ${WANDB_ENTITY} \
+            --doc pod-training-$(date +%Y%m%d-%H%M%S)
+          
           tail -f /dev/null
       
       volumeMounts:

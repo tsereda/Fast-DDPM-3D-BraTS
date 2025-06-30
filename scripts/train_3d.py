@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Complete 3D Fast-DDPM training script for BraTS
+Complete 3D Fast-DDPM training script for BraTS with W&B integration
 """
 
 import os
@@ -19,6 +19,14 @@ from collections import OrderedDict
 # Add the current directory to path to import modules
 sys.path.append('.')
 sys.path.append('..')
+
+# Import wandb - will be None if not installed
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    WANDB_AVAILABLE = False
 
 try:
     from models.fast_ddpm_3d import FastDDPM3D
@@ -45,6 +53,9 @@ def parse_args():
     parser.add_argument('--resume_path', type=str, help='Path to checkpoint to resume from')
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
     parser.add_argument('--log_every_n_steps', type=int, default=50, help='Log training progress every N steps')
+    parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
+    parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
+    parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity (username or team)')
 
     return parser.parse_args()
 
@@ -167,6 +178,36 @@ def validate_model(model, val_loader, device, betas, timesteps):
     model.train()
     return total_loss / num_batches if num_batches > 0 else 0
 
+def setup_wandb(args, config):
+    """Initialize W&B if requested"""
+    if args.use_wandb and WANDB_AVAILABLE:
+        # Check if we should use W&B from config too
+        use_wandb = args.use_wandb
+        if hasattr(config, 'logging') and hasattr(config.logging, 'use_wandb'):
+            use_wandb = use_wandb or config.logging.use_wandb
+        
+        if use_wandb:
+            # Get project name from config if available
+            project_name = args.wandb_project
+            if hasattr(config, 'logging') and hasattr(config.logging, 'project_name'):
+                project_name = config.logging.project_name
+            
+            # Initialize W&B
+            wandb.init(
+                project=project_name,
+                entity=args.wandb_entity,
+                name=args.doc,
+                config={
+                    **vars(args),
+                    'model_config': config.model.__dict__ if hasattr(config, 'model') else {},
+                    'data_config': config.data.__dict__ if hasattr(config, 'data') else {},
+                    'training_config': config.training.__dict__ if hasattr(config, 'training') else {},
+                    'diffusion_config': config.diffusion.__dict__ if hasattr(config, 'diffusion') else {},
+                }
+            )
+            return True
+    return False
+
 def main():
     args = parse_args()
     
@@ -190,6 +231,19 @@ def main():
     # Override config with args
     if hasattr(config, 'diffusion'):
         config.diffusion.num_diffusion_timesteps = getattr(config.diffusion, 'timesteps', 1000)
+    
+    # Override W&B settings from command line if provided
+    if args.use_wandb:
+        if not hasattr(config, 'logging'):
+            config.logging = argparse.Namespace()
+        config.logging.use_wandb = True
+    
+    # Setup W&B
+    use_wandb = setup_wandb(args, config)
+    if use_wandb:
+        logging.info("✅ W&B initialized successfully")
+    elif args.use_wandb and not WANDB_AVAILABLE:
+        logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
     
     # Create experiment directory
     exp_dir = os.path.join(args.exp, args.doc)
@@ -378,22 +432,47 @@ def main():
                 # Gradient clipping
                 if hasattr(config.training, 'gradient_clip'):
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip)
+                else:
+                    grad_norm = 0.0
                 
                 scaler.step(optimizer)
                 scaler.update()
                 
                 epoch_loss += loss.item()
-                if (batch_idx + 1) % args.log_every_n_steps == 0: # Use args.log_every_n_steps
-                        logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
-                            f'Batch {batch_idx+1}/{len(train_loader)} - '
-                            f'Step Loss: {loss.item():.6f}, '
-                            f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
-
+                
+                # Update progress bar
                 pbar.set_postfix({
                     'loss': f'{loss.item():.6f}',
                     'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
                 })
+                
+                # Log to W&B
+                if use_wandb and step % 10 == 0:  # Log every 10 steps
+                    log_dict = {
+                        'train/loss': loss.item(),
+                        'train/learning_rate': optimizer.param_groups[0]["lr"],
+                        'train/epoch': epoch,
+                        'train/step': step,
+                    }
+                    
+                    # Add gradient norm if available
+                    if grad_norm > 0:
+                        log_dict['train/grad_norm'] = grad_norm
+                    
+                    # Log GPU memory if available
+                    if torch.cuda.is_available():
+                        log_dict['system/gpu_memory_allocated'] = torch.cuda.memory_allocated() / 1e9
+                        log_dict['system/gpu_memory_reserved'] = torch.cuda.memory_reserved() / 1e9
+                    
+                    wandb.log(log_dict, step=step)
+                
+                # Console logging
+                if (batch_idx + 1) % args.log_every_n_steps == 0:
+                    logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
+                                f'Batch {batch_idx+1}/{len(train_loader)} - '
+                                f'Step Loss: {loss.item():.6f}, '
+                                f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
                 
                 # Save checkpoint
                 if step % getattr(config.training, 'save_every', 1000) == 0:
@@ -407,6 +486,13 @@ def main():
                     val_loss = validate_model(model, val_loader, device, betas, args.timesteps)
                     logging.info(f'Step {step} - Val Loss: {val_loss:.6f}')
                     
+                    # Log validation loss to W&B
+                    if use_wandb:
+                        wandb.log({
+                            'val/loss': val_loss,
+                            'val/epoch': epoch,
+                        }, step=step)
+                    
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         save_checkpoint(
@@ -414,6 +500,11 @@ def main():
                             config, os.path.join(log_dir, 'best_model.pth')
                         )
                         logging.info(f'New best validation loss: {val_loss:.6f}')
+                        
+                        # Log best model to W&B
+                        if use_wandb:
+                            wandb.run.summary["best_val_loss"] = val_loss
+                            wandb.run.summary["best_val_step"] = step
                 
             except Exception as e:
                 logging.error(f"Error in training step {step}: {e}")
@@ -426,6 +517,14 @@ def main():
         avg_loss = epoch_loss / len(train_loader)
         logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
         
+        # Log epoch metrics to W&B
+        if use_wandb:
+            wandb.log({
+                'epoch/avg_loss': avg_loss,
+                'epoch/learning_rate': optimizer.param_groups[0]["lr"],
+                'epoch/epoch': epoch + 1,
+            }, step=step)
+        
         # Save epoch checkpoint
         save_checkpoint(
             model, optimizer, scaler, step, epoch, avg_loss,
@@ -435,12 +534,20 @@ def main():
     logging.info("Training completed!")
     logging.info(f"Best validation loss: {best_val_loss:.6f}")
     logging.info(f"Final model saved at: {os.path.join(log_dir, 'ckpt.pth')}")
+    
+    # Finish W&B run
+    if use_wandb:
+        wandb.finish()
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
+        if wandb and wandb.run is not None:
+            wandb.finish()
     except Exception as e:
         print(f"\nTraining failed with error: {e}")
+        if wandb and wandb.run is not None:
+            wandb.finish()
         raise
