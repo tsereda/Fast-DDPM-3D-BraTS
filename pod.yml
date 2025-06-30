@@ -39,7 +39,7 @@ spec:
         - name: WANDB_PROJECT
           value: "fast-ddpm-3d-brats"
         - name: WANDB_ENTITY
-          value: "tsereda"  # Replace with your W&B username/team
+          value: "timgsereda"  # Replace with your W&B username/team
         - name: WANDB_MODE
           value: "online"  # Change to "offline" if needed
       
@@ -58,6 +58,7 @@ spec:
             if [ -f "$zip_file" ]; then
               echo "Extracting ${dataset}..."
               cd /data && 7z x "$zip_file" -y
+              sudo chown -R jovyan:jovyan "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}"
               cd ${REPO_PATH}
               ln -sf "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}" .
             fi
