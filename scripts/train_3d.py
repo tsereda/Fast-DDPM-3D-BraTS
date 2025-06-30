@@ -191,7 +191,11 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
 
     # Reverse process
     for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
-        t = (torch.ones(shape[0]) * i).to(device).long()
+        # Convert numpy scalars to Python ints for consistent handling
+        i_int = int(i)
+        j_int = int(j) if j >= 0 else -1
+        
+        t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
         
         # Create model input by replacing first channel with noisy image
         model_input = inputs.clone()
@@ -201,9 +205,14 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         et = model(model_input, t.float())
 
         # DDIM update rule - convert i,j to int for proper indexing
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][int(i)]
-        if j >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][int(j)]
+        i_int = int(i)
+        j_int = int(j) if j >= 0 else -1
+        
+        logging.info(f"Step {i_int}: i={i_int}, j={j_int}, alphas_cumprod shape={diffusion_vars['alphas_cumprod'].shape}")
+        
+        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int]
+        if j_int >= 0:
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int]
         else:
             alpha_cumprod_next = torch.tensor(1.0, device=device)
         
