@@ -210,15 +210,15 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         
         logging.info(f"Step {i_int}: i={i_int}, j={j_int}, alphas_cumprod shape={diffusion_vars['alphas_cumprod'].shape}")
         
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int]
+        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].item()
         if j_int >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int]
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int].item()
         else:
-            alpha_cumprod_next = torch.tensor(1.0, device=device)
+            alpha_cumprod_next = 1.0
         
-        # Reshape for broadcasting
-        alpha_cumprod_t = alpha_cumprod_t.view(1, 1, 1, 1, 1)
-        alpha_cumprod_next = alpha_cumprod_next.view(1, 1, 1, 1, 1)
+        # Convert back to tensors with proper shape for broadcasting
+        alpha_cumprod_t = torch.tensor(alpha_cumprod_t, device=device).view(1, 1, 1, 1, 1)
+        alpha_cumprod_next = torch.tensor(alpha_cumprod_next, device=device).view(1, 1, 1, 1, 1)
         
         # Predicted x0
         x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
