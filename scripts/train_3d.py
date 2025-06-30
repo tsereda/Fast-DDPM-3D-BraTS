@@ -155,12 +155,13 @@ def load_checkpoint(path, model, optimizer, scaler, device):
 
 def get_diffusion_variables(betas):
     """Pre-compute diffusion variables for sampling."""
+    device = betas.device
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, axis=0)
     
     return {
-        'alphas': alphas,
-        'alphas_cumprod': alphas_cumprod,
+        'alphas': alphas.to(device),
+        'alphas_cumprod': alphas_cumprod.to(device),
     }
 
 @torch.no_grad()
@@ -192,8 +193,8 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     # Reverse process
     for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
         # Convert numpy scalars to Python ints for tensor indexing
-        i_int = int(i)
-        j_int = int(j) if j >= 0 else -1
+        i_int = int(i.item()) if hasattr(i, 'item') else int(i)
+        j_int = int(j.item()) if hasattr(j, 'item') and j >= 0 else (-1 if j >= 0 else -1)
         
         t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
         
@@ -205,9 +206,9 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         et = model(model_input, t.float())
 
         # DDIM update rule - get alpha values directly as tensors
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int]
+        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].to(device)
         if j_int >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int]
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int].to(device)
         else:
             alpha_cumprod_next = torch.tensor(1.0, device=device)
         
@@ -501,6 +502,10 @@ def main():
     
     # --- START: Added diffusion vars for W&B logging ---
     diffusion_vars = get_diffusion_variables(betas) if use_wandb else None
+    if diffusion_vars:
+        # Ensure all diffusion variables are on the correct device
+        for key in diffusion_vars:
+            diffusion_vars[key] = diffusion_vars[key].to(device)
     # --- END: Added diffusion vars ---
 
     scaler = GradScaler()
