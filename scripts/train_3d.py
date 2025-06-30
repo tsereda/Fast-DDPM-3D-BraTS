@@ -200,10 +200,10 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         # Predict noise using the model
         et = model(model_input, t.float())
 
-        # DDIM update rule
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i]
+        # DDIM update rule - convert i,j to int for proper indexing
+        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][int(i)]
         if j >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j]
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][int(j)]
         else:
             alpha_cumprod_next = torch.tensor(1.0, device=device)
         
