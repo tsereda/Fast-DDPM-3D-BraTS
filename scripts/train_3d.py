@@ -193,8 +193,12 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
         t = (torch.ones(shape[0]) * i).to(device).long()
         
+        # Create model input by replacing first channel with noisy image
+        model_input = inputs.clone()
+        model_input[:, 0:1] = img
+        
         # Predict noise using the model
-        et = model(inputs, img, t)
+        et = model(model_input, t.float())
 
         # DDIM update rule
         alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i]
