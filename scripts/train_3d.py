@@ -193,8 +193,8 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     # Reverse process
     for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
         # Convert numpy scalars to Python ints for tensor indexing
-        i_int = int(i.item()) if hasattr(i, 'item') else int(i)
-        j_int = int(j.item()) if hasattr(j, 'item') and j >= 0 else (-1 if j >= 0 else -1)
+        i_int = int(i) if isinstance(i, (int, np.integer)) else int(i.item())
+        j_int = int(j) if isinstance(j, (int, np.integer)) and j >= 0 else -1
         
         t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
         
@@ -204,6 +204,10 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         
         # Predict noise using the model
         et = model(model_input, t.float())
+        
+        # Handle tuple output for variance learning models
+        if isinstance(et, tuple):
+            et = et[0]  # Use mean prediction only
 
         # DDIM update rule - get alpha values directly as tensors
         alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].to(device)
@@ -524,6 +528,17 @@ def main():
     logging.info(f"Volume size: {config.data.volume_size}")
     logging.info(f"Batch size: {config.training.batch_size}")
     
+    # Debug loss function selection
+    if hasattr(config.diffusion, 'loss_type'):
+        logging.info(f"Using loss type: {config.diffusion.loss_type}")
+        if config.diffusion.loss_type == 'hybrid':
+            var_type = getattr(config.model, 'var_type', 'fixed')
+            logging.info(f"Using fast_ddpm_loss with var_type: {var_type}")
+        else:
+            logging.info("Using sg_noise_estimation_loss")
+    else:
+        logging.info("Using sg_noise_estimation_loss (default)")
+    
     step = start_step
     best_val_loss = float('inf')
     
@@ -566,7 +581,13 @@ def main():
                 e = torch.randn_like(targets)
                 
                 with autocast():
-                    loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas)
+                    # Use appropriate loss function based on config
+                    if hasattr(config.diffusion, 'loss_type') and config.diffusion.loss_type == 'hybrid':
+                        var_type = getattr(config.model, 'var_type', 'fixed')
+                        from functions.losses import fast_ddpm_loss
+                        loss = fast_ddpm_loss(model, inputs, targets, t, e, betas, var_type=var_type)
+                    else:
+                        loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas)
                 
                 scaler.scale(loss).backward()
                 

@@ -215,9 +215,9 @@ def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, keepdim=
 
     # Compute loss
     if keepdim:
-        return (e - output).square().sum(dim=(1, 2, 3, 4))
+        return (e - output).square().mean(dim=(1, 2, 3, 4))
     else:
-        return (e - output).square().sum(dim=(1, 2, 3, 4)).mean(dim=0)
+        return (e - output).square().mean()
 
 
 def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
