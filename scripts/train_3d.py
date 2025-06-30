@@ -169,12 +169,15 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     Generates an image sample from the model using DDIM and logs 2D slices to W&B
     for an image-to-image translation task.
     """
+    logging.info(f"Starting W&B sample logging at step {step}")
     model.eval()
 
     # Use the provided fixed batch
     inputs = batch['input'].to(device)    # [1, 4, H, W, D]
     targets = batch['target'].to(device)  # [1, H, W, D]
     targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
+    
+    logging.info(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
 
     # Generate a sample using the reverse diffusion process (DDIM)
     shape = targets.shape
@@ -183,6 +186,8 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     # Create the reverse timestep sequence from the training schedule
     seq = t_intervals.cpu().numpy()
     seq_next = [-1] + list(seq[:-1])
+    
+    logging.info(f"Diffusion sequence length: {len(seq)}")
 
     # Reverse process
     for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
@@ -206,6 +211,7 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     
     # Clamp the final sample to a valid image range
     generated_sample = img.clamp(0.0, 1.0)
+    logging.info(f"Generated sample shape: {generated_sample.shape}, range: [{generated_sample.min():.3f}, {generated_sample.max():.3f}]")
 
     # --- Prepare slices for logging ---
     # We'll take the middle slice from the depth axis
@@ -219,7 +225,22 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     target_image_slice = targets[0, 0, :, :, slice_idx].cpu().numpy()
     generated_image_slice = generated_sample[0, 0, :, :, slice_idx].cpu().numpy()
 
+    # Normalize slices to 0-1 range for better visualization
+    def normalize_slice(slice_array):
+        slice_min, slice_max = slice_array.min(), slice_array.max()
+        if slice_max > slice_min:
+            return (slice_array - slice_min) / (slice_max - slice_min)
+        return slice_array
+
+    input_flair_slice = normalize_slice(input_flair_slice)
+    target_image_slice = normalize_slice(target_image_slice)
+    generated_image_slice = normalize_slice(generated_image_slice)
+
     # Log to W&B as a gallery of images for side-by-side comparison
+    if not WANDB_AVAILABLE:
+        logging.error("W&B is not available, cannot log images")
+        return
+    
     log_dict = {
         "samples/image_comparison": [
             wandb.Image(input_flair_slice, caption=f"Input: FLAIR (Step {step})"),
@@ -229,7 +250,8 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
     }
 
     wandb.log(log_dict, step=step)
-    logging.info(f"Logged sample image slices to W&B at step {step}")
+    logging.info(f"Successfully logged sample image slices to W&B at step {step}")
+    logging.info(f"Slice shapes - Input: {input_flair_slice.shape}, Generated: {generated_image_slice.shape}, Target: {target_image_slice.shape}")
     
     model.train() # Set model back to training mode
 
@@ -485,6 +507,22 @@ def main():
     step = start_step
     best_val_loss = float('inf')
     
+    # Log initial sample to W&B if enabled
+    if use_wandb and fixed_val_batch and diffusion_vars:
+        logging.info("Logging initial sample to W&B...")
+        try:
+            log_sample_slices_to_wandb(
+                model.module if isinstance(model, nn.DataParallel) else model,
+                fixed_val_batch,
+                t_intervals,
+                diffusion_vars,
+                device,
+                step=0
+            )
+            logging.info("Successfully logged initial sample to W&B")
+        except Exception as e:
+            logging.error(f"Failed to log initial sample to W&B: {e}")
+    
     for epoch in range(start_epoch, config.training.epochs):
         model.train()
         epoch_loss = 0.0
@@ -554,7 +592,7 @@ def main():
                         config, os.path.join(log_dir, f'ckpt_{step}.pth')
                     )
                 
-                if step % getattr(config.training, 'validate_every', 500) == 0:
+                if step % getattr(config.training, 'validate_every', 100) == 0:
                     val_loss = validate_model(model, val_loader, device, betas, args.timesteps)
                     logging.info(f'Step {step} - Val Loss: {val_loss:.6f}')
                     
