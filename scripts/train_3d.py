@@ -202,7 +202,14 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
 
         # DDIM update rule
         alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i]
-        alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j] if j >= 0 else torch.tensor(1.0, device=device)
+        if j >= 0:
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j]
+        else:
+            alpha_cumprod_next = torch.tensor(1.0, device=device)
+        
+        # Reshape for broadcasting
+        alpha_cumprod_t = alpha_cumprod_t.view(1, 1, 1, 1, 1)
+        alpha_cumprod_next = alpha_cumprod_next.view(1, 1, 1, 1, 1)
         
         # Predicted x0
         x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
