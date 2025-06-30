@@ -191,7 +191,7 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
 
     # Reverse process
     for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
-        # Convert numpy scalars to Python ints for consistent handling
+        # Convert numpy scalars to Python ints for tensor indexing
         i_int = int(i)
         j_int = int(j) if j >= 0 else -1
         
@@ -204,21 +204,16 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         # Predict noise using the model
         et = model(model_input, t.float())
 
-        # DDIM update rule - convert i,j to int for proper indexing
-        i_int = int(i)
-        j_int = int(j) if j >= 0 else -1
-        
-        logging.info(f"Step {i_int}: i={i_int}, j={j_int}, alphas_cumprod shape={diffusion_vars['alphas_cumprod'].shape}")
-        
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].item()
+        # DDIM update rule - get alpha values directly as tensors
+        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int]
         if j_int >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int].item()
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int]
         else:
-            alpha_cumprod_next = 1.0
+            alpha_cumprod_next = torch.tensor(1.0, device=device)
         
-        # Convert back to tensors with proper shape for broadcasting
-        alpha_cumprod_t = torch.tensor(alpha_cumprod_t, device=device).view(1, 1, 1, 1, 1)
-        alpha_cumprod_next = torch.tensor(alpha_cumprod_next, device=device).view(1, 1, 1, 1, 1)
+        # Ensure proper broadcasting shape for 5D tensors
+        alpha_cumprod_t = alpha_cumprod_t.view(1, 1, 1, 1, 1)
+        alpha_cumprod_next = alpha_cumprod_next.view(1, 1, 1, 1, 1)
         
         # Predicted x0
         x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
