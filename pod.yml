@@ -49,8 +49,6 @@ spec:
           git clone -b dev3 https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           
-          mkdir -p /app/nnunet/{raw,preprocessed,results}
-          
           sudo apt-get update && sudo apt-get install -y p7zip-full wget git
           
           for dataset in "TrainingData" "ValidationData"; do
@@ -70,12 +68,12 @@ spec:
           python -c "import wandb; print(f'W&B version: {wandb.__version__}')"
           python test_loss.py
           echo "Starting training with W&B logging..."
-          # PYTHONUNBUFFERED=1 python scripts/train_3d.py \
-          #   --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
-          #   --use_wandb \
-          #   --wandb_project ${WANDB_PROJECT} \
-          #   --wandb_entity ${WANDB_ENTITY} \
-          #   --doc pod-training-$(date +%Y%m%d-%H%M%S)
+          PYTHONUNBUFFERED=1 python scripts/train_3d.py \
+            --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
+            --use_wandb \
+            --wandb_project ${WANDB_PROJECT} \
+            --wandb_entity ${WANDB_ENTITY} \
+            --doc pod-training-$(date +%Y%m%d-%H%M%S)
           
           tail -f /dev/null
       
