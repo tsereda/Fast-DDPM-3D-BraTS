@@ -25,7 +25,7 @@ except ImportError:
 
 try:
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import sg_noise_estimation_loss, combined_loss
+    from functions.losses import unified_4to4_loss  # FIXED: Import the correct loss function
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     from utils.gpu_memory import get_recommended_volume_size, check_memory_usage
     from utils.data_validation import validate_brats_data_structure, print_validation_results
@@ -72,9 +72,8 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
             beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64
         )
     elif beta_schedule == "cosine":
-        # Cosine schedule as in improved DDPM
         steps = num_diffusion_timesteps + 1
-        s = 0.008  # small offset
+        s = 0.008
         x = np.linspace(0, num_diffusion_timesteps, steps)
         alphas_cumprod = np.cos(((x / num_diffusion_timesteps) + s) / (1 + s) * np.pi * 0.5) ** 2
         alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
@@ -110,11 +109,9 @@ def get_timestep_schedule(scheduler_type, timesteps, num_timesteps):
         skip = num_timesteps // timesteps
         t_intervals = torch.arange(0, num_timesteps, skip)
     elif scheduler_type == 'non-uniform':
-        # Non-uniform schedule from Fast-DDPM paper (optimized for 10 steps)
         if timesteps == 10:
             t_intervals = torch.tensor([0, 199, 399, 599, 699, 799, 849, 899, 949, 999])
         else:
-            # Adaptive non-uniform schedule
             num_1 = int(timesteps * 0.4)
             num_2 = int(timesteps * 0.6)
             stage_1 = torch.linspace(0, 699, num_1 + 1)[:-1]
@@ -151,132 +148,8 @@ def load_checkpoint(path, model, optimizer, scaler, device):
     
     return checkpoint['epoch'], checkpoint['step'], checkpoint['loss']
 
-# --- START: New functions for W&B sample logging ---
-
-def get_diffusion_variables(betas):
-    """Pre-compute diffusion variables for sampling."""
-    device = betas.device
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, axis=0)
-    
-    return {
-        'alphas': alphas.to(device),
-        'alphas_cumprod': alphas_cumprod.to(device),
-    }
-
-@torch.no_grad()
-def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device, step):
-    """
-    Generates an image sample from the model using DDIM and logs 2D slices to W&B
-    for an image-to-image translation task.
-    """
-    logging.info(f"Starting W&B sample logging at step {step}")
-    model.eval()
-
-    # Use the provided fixed batch
-    inputs = batch['input'].to(device)    # [1, 4, H, W, D]
-    targets = batch['target'].to(device)  # [1, H, W, D]
-    targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
-    
-    logging.info(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
-
-    # Generate a sample using the reverse diffusion process (DDIM)
-    shape = targets.shape
-    img = torch.randn(shape, device=device) # Start with pure noise
-
-    # Create the reverse timestep sequence from the training schedule
-    seq = t_intervals.cpu().numpy()
-    seq_next = [-1] + list(seq[:-1])
-    
-    logging.info(f"Diffusion sequence length: {len(seq)}")
-
-    # Reverse process
-    for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
-        # Convert numpy scalars to Python ints for tensor indexing
-        i_int = int(i) if isinstance(i, (int, np.integer)) else int(i.item())
-        j_int = int(j) if isinstance(j, (int, np.integer)) and j >= 0 else -1
-        
-        t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
-        
-        # Create model input by replacing first channel with noisy image
-        model_input = inputs.clone()
-        model_input[:, 0:1] = img
-        
-        # Predict noise using the model
-        et = model(model_input, t.float())
-        
-        # Handle tuple output for variance learning models
-        if isinstance(et, tuple):
-            et = et[0]  # Use mean prediction only
-
-        # DDIM update rule - get alpha values directly as tensors
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].to(device)
-        if j_int >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int].to(device)
-        else:
-            alpha_cumprod_next = torch.tensor(1.0, device=device)
-        
-        # Ensure proper broadcasting shape for 5D tensors
-        alpha_cumprod_t = alpha_cumprod_t.view(1, 1, 1, 1, 1)
-        alpha_cumprod_next = alpha_cumprod_next.view(1, 1, 1, 1, 1)
-        
-        # Predicted x0
-        x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
-        
-        # Direction pointing to x_t
-        c1 = (1 - alpha_cumprod_next).sqrt()
-        
-        # Update
-        img = alpha_cumprod_next.sqrt() * x0_t + c1 * et
-    
-    # Clamp the final sample to a valid image range
-    generated_sample = img.clamp(-1.0, 1.0)
-    logging.info(f"Generated sample shape: {generated_sample.shape}, range: [{generated_sample.min():.3f}, {generated_sample.max():.3f}]")
-
-    # --- Prepare slices for logging ---
-    # We'll take the middle slice from the depth axis
-    slice_idx = generated_sample.shape[-1] // 2
-
-    # Get slices (convert to numpy for visualization)
-    # Using FLAIR as the example input modality for context
-    input_flair_slice = inputs[0, 3, :, :, slice_idx].cpu().numpy()
-
-    # Ground truth and generated image sample (no longer treated as masks)
-    target_image_slice = targets[0, 0, :, :, slice_idx].cpu().numpy()
-    generated_image_slice = generated_sample[0, 0, :, :, slice_idx].cpu().numpy()
-
-    # Normalize slices to 0-1 range for better visualization
-    def normalize_slice(slice_array):
-        # Convert from [-1, 1] model range to [0, 1] for visualization
-        return (slice_array + 1) / 2  # Simple conversion from [-1,1] to [0,1]
-
-    input_flair_slice = normalize_slice(input_flair_slice)
-    target_image_slice = normalize_slice(target_image_slice)
-    generated_image_slice = normalize_slice(generated_image_slice)
-
-    # Log to W&B as a gallery of images for side-by-side comparison
-    if not WANDB_AVAILABLE:
-        logging.error("W&B is not available, cannot log images")
-        return
-    
-    log_dict = {
-        "samples/image_comparison": [
-            wandb.Image(input_flair_slice, caption=f"Input: FLAIR (Step {step})"),
-            wandb.Image(generated_image_slice, caption=f"Model Output (Step {step})"),
-            wandb.Image(target_image_slice, caption=f"Ground Truth (Step {step})")
-        ]
-    }
-
-    wandb.log(log_dict, step=step)
-    logging.info(f"Successfully logged sample image slices to W&B at step {step}")
-    logging.info(f"Slice shapes - Input: {input_flair_slice.shape}, Generated: {generated_image_slice.shape}, Target: {target_image_slice.shape}")
-    
-    model.train() # Set model back to training mode
-
-# --- END: New functions for W&B sample logging ---
-
-def validate_model(model, val_loader, device, betas, timesteps):
-    """Validation loop"""
+def validate_model(model, val_loader, device, betas, t_intervals):
+    """Validation loop - FIXED to not create new batches"""
     model.eval()
     total_loss = 0
     num_batches = 0
@@ -285,16 +158,15 @@ def validate_model(model, val_loader, device, betas, timesteps):
         for batch in tqdm(val_loader, desc="Validating", leave=False):
             inputs = batch['input'].to(device)
             targets = batch['target'].to(device).unsqueeze(1)
+            target_idx = batch['target_idx'][0].item()  # Get the target index from batch
             
             n = inputs.size(0)
-            # Use full timestep range for validation loss for consistency
-            t = torch.randint(0, len(betas), (n,), device=device)
+            # Use Fast-DDPM timestep schedule for validation too
+            idx = torch.randint(0, len(t_intervals), (n,))
+            t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
-
-            batch = next(iter(train_loader))
-            target_idx = batch.get('target_idx', 0) 
             
-            loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
+            loss = unified_4to4_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
@@ -304,18 +176,15 @@ def validate_model(model, val_loader, device, betas, timesteps):
 def setup_wandb(args, config):
     """Initialize W&B if requested"""
     if args.use_wandb and WANDB_AVAILABLE:
-        # Check if we should use W&B from config too
         use_wandb = args.use_wandb
         if hasattr(config, 'logging') and hasattr(config.logging, 'use_wandb'):
             use_wandb = use_wandb or config.logging.use_wandb
         
         if use_wandb:
-            # Get project name from config if available
             project_name = args.wandb_project
             if hasattr(config, 'logging') and hasattr(config.logging, 'project_name'):
                 project_name = config.logging.project_name
             
-            # Initialize W&B
             wandb.init(
                 project=project_name,
                 entity=args.wandb_entity,
@@ -344,16 +213,52 @@ def main():
     
     # Load config
     if not os.path.exists(args.config):
-        raise FileNotFoundError(f"Config file not found: {args.config}")
+        # Create a basic config if it doesn't exist
+        basic_config = {
+            'model': {
+                'ch': 64,
+                'out_ch': 1,
+                'ch_mult': [1, 2, 4],
+                'num_res_blocks': 2,
+                'dropout': 0.0,
+                'in_channels': 4,
+                'resamp_with_conv': True,
+            },
+            'data': {
+                'volume_size': [80, 80, 80],
+                'num_workers': 4,
+            },
+            'training': {
+                'batch_size': 1,
+                'learning_rate': 1e-4,
+                'epochs': 100,
+                'save_every': 1000,
+                'validate_every': 500,
+            },
+            'diffusion': {
+                'beta_schedule': 'linear',
+                'beta_start': 0.0001,
+                'beta_end': 0.02,
+                'num_diffusion_timesteps': 1000,
+            }
+        }
         
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-    config = dict2namespace(config)
+        config = dict2namespace(basic_config)
+        logging.warning(f"Config file not found: {args.config}, using basic config")
+    else:
+        with open(args.config, 'r') as f:
+            config = yaml.safe_load(f)
+        config = dict2namespace(config)
+    
     config.device = device
     
     # Override config with args
     if hasattr(config, 'diffusion'):
         config.diffusion.num_diffusion_timesteps = getattr(config.diffusion, 'timesteps', 1000)
+    
+    # Force simple variance type
+    if hasattr(config, 'model'):
+        config.model.var_type = 'fixedsmall'  # Use original Fast-DDPM style
     
     # Override W&B settings from command line if provided
     if args.use_wandb:
@@ -379,26 +284,13 @@ def main():
     # Dataset and DataLoader
     logging.info("Setting up datasets...")
     
-    # Validate data structure first
-    validation_results = validate_brats_data_structure(args.data_root)
-    print_validation_results(validation_results)
-    
-    if not validation_results['valid']:
-        raise ValueError("Invalid data structure. Please check your BraTS data directory.")
-    
-    # Auto-adjust volume size based on GPU memory
-    recommended_size = get_recommended_volume_size()
+    # Use provided volume size or default
     if hasattr(config.data, 'volume_size'):
-        original_size = tuple(config.data.volume_size)
-        print(f"Config volume size: {original_size}")
-        print(f"Recommended volume size: {recommended_size}")
-        
-        # Use the smaller of the two (more conservative)
-        final_size = tuple(min(o, r) for o, r in zip(original_size, recommended_size))
-        config.data.volume_size = final_size
-        print(f"Using volume size: {final_size}")
+        volume_size = tuple(config.data.volume_size)
     else:
-        config.data.volume_size = recommended_size
+        volume_size = (80, 80, 80)  # Default size
+    
+    print(f"Using volume size: {volume_size}")
     
     # Check if data root exists
     if not os.path.exists(args.data_root):
@@ -408,13 +300,13 @@ def main():
         train_dataset = BraTS3DUnifiedDataset(
             data_root=args.data_root,
             phase='train',
-            volume_size=tuple(config.data.volume_size)
+            volume_size=volume_size
         )
         
         val_dataset = BraTS3DUnifiedDataset(
             data_root=args.data_root,
-            phase='train',  # Use same for now, can change to 'val' if available
-            volume_size=tuple(config.data.volume_size)
+            phase='train',
+            volume_size=volume_size
         )
         
         if args.debug:
@@ -440,23 +332,11 @@ def main():
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,  # Smaller batch for validation
+        batch_size=1,
         shuffle=False,
         num_workers=2,
         pin_memory=True
     )
-    
-    # --- START: Modified section for W&B sample logging ---
-    # Get a fixed batch from the validation set for consistent logging
-    fixed_val_batch = None
-    if use_wandb and len(val_loader) > 0:
-        try:
-            fixed_val_batch = next(iter(val_loader))
-            logging.info("Grabbed a fixed validation batch for W&B logging.")
-        except StopIteration:
-            fixed_val_batch = None
-            logging.warning("Validation loader is empty, cannot log sample slices.")
-    # --- END: Modified section ---
 
     logging.info(f"Train samples: {len(train_dataset)}")
     logging.info(f"Val samples: {len(val_dataset)}")
@@ -504,14 +384,6 @@ def main():
     num_timesteps = betas.shape[0]
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
-    
-    # --- START: Added diffusion vars for W&B logging ---
-    diffusion_vars = get_diffusion_variables(betas) if use_wandb else None
-    if diffusion_vars:
-        # Ensure all diffusion variables are on the correct device
-        for key in diffusion_vars:
-            diffusion_vars[key] = diffusion_vars[key].to(device)
-    # --- END: Added diffusion vars ---
 
     scaler = GradScaler()
     
@@ -526,38 +398,12 @@ def main():
     
     logging.info("Starting 3D Fast-DDPM training...")
     logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
-    logging.info(f"Volume size: {config.data.volume_size}")
+    logging.info(f"Volume size: {volume_size}")
     logging.info(f"Batch size: {config.training.batch_size}")
-    
-    # Debug loss function selection
-    if hasattr(config.diffusion, 'loss_type'):
-        logging.info(f"Using loss type: {config.diffusion.loss_type}")
-        if config.diffusion.loss_type == 'hybrid':
-            var_type = getattr(config.model, 'var_type', 'fixed')
-            logging.info(f"Using fast_ddpm_loss with var_type: {var_type}")
-        else:
-            logging.info("Using sg_noise_estimation_loss")
-    else:
-        logging.info("Using sg_noise_estimation_loss (default)")
+    logging.info("Using simple unified_4to4_loss (Fixed variance, original Fast-DDPM style)")
     
     step = start_step
     best_val_loss = float('inf')
-    
-    # Log initial sample to W&B if enabled
-    if use_wandb and fixed_val_batch and diffusion_vars:
-        logging.info("Logging initial sample to W&B...")
-        try:
-            log_sample_slices_to_wandb(
-                model.module if isinstance(model, nn.DataParallel) else model,
-                fixed_val_batch,
-                t_intervals,
-                diffusion_vars,
-                device,
-                step=0
-            )
-            logging.info("Successfully logged initial sample to W&B")
-        except Exception as e:
-            logging.error(f"Failed to log initial sample to W&B: {e}")
     
     for epoch in range(start_epoch, config.training.epochs):
         model.train()
@@ -570,10 +416,12 @@ def main():
                 
                 inputs = batch['input'].to(device)
                 targets = batch['target'].to(device).unsqueeze(1)
+                target_idx = batch['target_idx'][0].item()  # Get actual target index
                 
                 n = inputs.size(0)
                 step += 1
                 
+                # Fast-DDPM antithetic sampling
                 idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
                 idx_2 = len(t_intervals) - idx_1 - 1
                 idx = torch.cat([idx_1, idx_2], dim=0)[:n]
@@ -582,15 +430,8 @@ def main():
                 e = torch.randn_like(targets)
                 
                 with autocast():
-                    # Use appropriate loss function based on config
-                    if hasattr(config.diffusion, 'loss_type') and config.diffusion.loss_type == 'hybrid':
-                        var_type = getattr(config.model, 'var_type', 'fixed')
-                        from functions.losses import fast_ddpm_loss
-                        loss = fast_ddpm_loss(model, inputs, targets, t, e, betas, var_type=var_type)
-                    else:
-                        batch = next(iter(train_loader))
-                        target_idx = batch.get('target_idx', 0)
-                        loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
+                    # SIMPLIFIED: Use only the simple 3D loss
+                    loss = unified_4to4_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
                 
                 scaler.scale(loss).backward()
                 
@@ -607,7 +448,8 @@ def main():
                 
                 pbar.set_postfix({
                     'loss': f'{loss.item():.6f}',
-                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                    'target': f'{target_idx}'
                 })
                 
                 if use_wandb and step % 10 == 0:
@@ -616,6 +458,7 @@ def main():
                         'train/learning_rate': optimizer.param_groups[0]["lr"],
                         'train/epoch': epoch,
                         'train/step': step,
+                        'train/target_idx': target_idx,
                     }
                     if grad_norm > 0:
                         log_dict['train/grad_norm'] = grad_norm
@@ -628,6 +471,7 @@ def main():
                     logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
                                  f'Batch {batch_idx+1}/{len(train_loader)} - '
                                  f'Step Loss: {loss.item():.6f}, '
+                                 f'Target: {target_idx}, '
                                  f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
                 
                 if step % getattr(config.training, 'save_every', 1000) == 0:
@@ -636,8 +480,8 @@ def main():
                         config, os.path.join(log_dir, f'ckpt_{step}.pth')
                     )
                 
-                if step % getattr(config.training, 'validate_every', 100) == 0:
-                    val_loss = validate_model(model, val_loader, device, betas, args.timesteps)
+                if step % getattr(config.training, 'validate_every', 500) == 0:
+                    val_loss = validate_model(model, val_loader, device, betas, t_intervals)
                     logging.info(f'Step {step} - Val Loss: {val_loss:.6f}')
                     
                     if use_wandb:
@@ -645,19 +489,6 @@ def main():
                             'val/loss': val_loss,
                             'val/epoch': epoch,
                         }, step=step)
-                        
-                        # --- START: Call to the W&B sample logging function ---
-                        if fixed_val_batch and diffusion_vars:
-                            log_sample_slices_to_wandb(
-                                # unwrap model from DataParallel if used
-                                model.module if isinstance(model, nn.DataParallel) else model,
-                                fixed_val_batch,
-                                t_intervals,
-                                diffusion_vars,
-                                device,
-                                step
-                            )
-                        # --- END: Call to the W&B sample logging function ---
                     
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
