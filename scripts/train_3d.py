@@ -580,8 +580,18 @@ def main():
                 
                 # Additional safety check for extreme loss values
                 loss_value = loss.item()
-                if loss_value > 1000.0:
-                    logging.warning(f"Very large loss detected: {loss_value:.6f} - possible scaling issue")
+                
+                # Add detailed diagnostic information
+                print(f"Raw loss: {loss_value:.8f}")
+                print(f"Loss per voxel: {loss_value / (64*64*64):.2e}")
+                
+                if loss_value > 50.0:  # Lower threshold based on our new config
+                    logging.warning(f"Large loss detected: {loss_value:.6f} - investigating...")
+                    print(f"  Timestep t: {t.cpu().numpy()}")
+                    print(f"  Target modality: {target_idx}")
+                    print(f"  Input stats: min={inputs.min():.6f}, max={inputs.max():.6f}, std={inputs.std():.6f}")
+                    print(f"  Target stats: min={targets.min():.6f}, max={targets.max():.6f}, std={targets.std():.6f}")
+                    print(f"  Noise stats: min={e.min():.6f}, max={e.max():.6f}, std={e.std():.6f}")
                 elif loss_value < 1e-8:
                     logging.warning(f"Very small loss detected: {loss_value:.6e} - possible underflow")
                 
@@ -597,11 +607,18 @@ def main():
                         max_norm=getattr(config.training, 'gradient_clip', float('inf'))
                     )
                     
+                    # Add gradient norm diagnostic
+                    print(f"Gradient norm before scaling: {grad_norm:.6f}")
+                    if grad_norm > 5.0:  # Based on our stability config
+                        logging.warning(f"High gradient norm detected: {grad_norm:.6f}")
+                    
                     scaler.step(optimizer)
                     scaler.update()
                     
-                    # Monitor gradient scaler health
+                    # Monitor gradient scaler health with more detailed info
                     if global_step % 100 == 0:  # Check every 100 steps
+                        current_scale = scaler.get_scale()
+                        print(f"Scaler state at step {global_step}: scale={current_scale:.1f}")
                         monitor_scaler_health(scaler, global_step)
                     
                     # Move scheduler step here to avoid the warning

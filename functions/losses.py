@@ -77,7 +77,7 @@ def sg_noise_estimation_loss(model,
 
 def unified_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdim=False):
     """
-    4→1 Fast-DDPM loss for unified BraTS modality synthesis
+    4→1 Fast-DDPM loss for unified BraTS modality synthesis with stability improvements
     
     Args:
         model: 3D diffusion model (outputs 1 channel)
@@ -100,7 +100,6 @@ def unified_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepd
     model_input[:, target_idx:target_idx+1] = x_noisy
     
     # Model predicts noise for the target modality [B, 1, H, W, D]
-    # Note: This is actually 4→1, despite the function name for compatibility
     predicted_noise = model(model_input, t.float())
     
     # Handle variance learning models
@@ -108,15 +107,32 @@ def unified_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepd
         predicted_noise = predicted_noise[0]
     
     # MSE loss between actual noise and predicted noise
-    # Normalize by volume size to prevent scaling issues
     mse_loss = (e - predicted_noise).square()
+    
+    # Add stability improvements to prevent spikes
+    # 1. Clamp extreme values
+    mse_loss = torch.clamp(mse_loss, max=100.0)  # Prevent extremely large individual losses
+    
+    # 2. Use Huber loss for robustness against outliers
+    delta = 1.0
+    huber_loss = torch.where(
+        mse_loss < delta**2,
+        0.5 * mse_loss,
+        delta * (torch.sqrt(mse_loss) - 0.5 * delta)
+    )
     
     if keepdim:
         # Return per-sample loss, normalized by volume size
-        return mse_loss.view(mse_loss.size(0), -1).mean(dim=1)
+        return huber_loss.view(huber_loss.size(0), -1).mean(dim=1)
     else:
-        # Return scalar loss, properly normalized - removed the *1000 scaling
-        return mse_loss.mean()
+        # Return scalar loss with gradient smoothing
+        loss_val = huber_loss.mean()
+        
+        # Additional stability: if loss is too high, apply stronger regularization
+        if loss_val > 10.0:
+            loss_val = loss_val * 0.1 + 1.0  # Dampen very high losses
+            
+        return loss_val
 
 
 # 3D versions of existing loss functions

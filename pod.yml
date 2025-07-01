@@ -75,7 +75,8 @@ spec:
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
             --doc pod-training-$(date +%Y%m%d-%H%M%S) \
-            --sample_every 50
+            --sample_every 50 \
+            --gradient_accumulation_steps 8
           
           tail -f /dev/null
       

@@ -27,30 +27,34 @@ diffusion:
 training:
     batch_size: 1        # Small batch size for 3D
     epochs: 1000
-    learning_rate: 0.00005   # Further reduced for stability
-    weight_decay: 0.0
-    gradient_clip: 0.5       # Reduced gradient clipping for better stability
+    learning_rate: 0.00002   # Even more conservative for late-training stability
+    weight_decay: 0.01       # Add weight decay for regularization
+    gradient_clip: 0.1       # Much tighter gradient clipping to prevent spikes
     save_every: 2000     # Save checkpoint every 2000 training steps (less frequent)
     validate_every: 1000 # Validate every 1000 training steps
     log_every_n_steps: 50
     # Gradient accumulation will be controlled via command line argument
     
-    # Loss scaling settings for stability - more conservative
-    loss_scale_init: 512.0     # Much lower initial scale
-    loss_scale_growth: 1000    # More frequent growth checks
-    loss_scale_backoff: 0.25   # More aggressive scale reduction on overflow
+    # Loss scaling settings for stability - very conservative to prevent spikes
+    loss_scale_init: 128.0     # Even lower initial scale
+    loss_scale_growth: 500     # More frequent scale adjustments
+    loss_scale_backoff: 0.1    # Very aggressive scale reduction on overflow
+    loss_scale_max: 1024.0     # Cap maximum scale to prevent runaway scaling
     
 optim:
-    weight_decay: 0.0
+    weight_decay: 0.01       # Add weight decay for regularization
     optimizer: "Adam"
-    lr: 0.000025  # Further reduced to match training.learning_rate
+    lr: 0.00002              # Match training.learning_rate
     beta1: 0.9
+    beta2: 0.999             # Default beta2 for better stability
     amsgrad: false
     eps: 0.00000001
 
 # Additional stability settings
 stability:
-    warmup_steps: 500           # Reduced warmup for faster convergence
-    memory_cleanup_interval: 50 # More frequent cleanup for stability
-    nan_check_interval: 25      # More frequent NaN checks
-    max_loss_threshold: 500.0   # Alert threshold for large losses
+    warmup_steps: 200           # Shorter warmup since training is progressing
+    memory_cleanup_interval: 25 # Very frequent cleanup to prevent memory issues
+    nan_check_interval: 10      # Very frequent NaN checks
+    max_loss_threshold: 50.0    # Much lower threshold to catch spikes early
+    gradient_norm_threshold: 5.0 # Alert if gradient norm gets too high
+    lr_schedule: "cosine_annealing_warm_restarts"  # Better LR schedule for stability
