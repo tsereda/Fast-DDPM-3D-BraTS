@@ -352,11 +352,14 @@ def main():
         
         if args.debug:
             from torch.utils.data import Subset
-            train_indices = list(range(min(10, len(train_dataset))))
-            val_indices = list(range(min(5, len(val_dataset))))
+            # Use larger debug dataset: ~10% of total for meaningful epochs
+            debug_train_size = min(125, len(train_dataset))  # ~125 cases = ~125 batches per epoch
+            debug_val_size = min(25, len(val_dataset))       # ~25 cases for validation
+            train_indices = list(range(debug_train_size))
+            val_indices = list(range(debug_val_size))
             train_dataset = Subset(train_dataset, train_indices)
             val_dataset = Subset(val_dataset, val_indices)
-            logging.info("Debug mode: using smaller datasets")
+            logging.info(f"Debug mode: using {debug_train_size} train samples, {debug_val_size} val samples")
         
     except Exception as e:
         logging.error(f"Failed to create datasets: {e}")
