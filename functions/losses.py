@@ -108,10 +108,15 @@ def unified_4to4_loss(model, x_available, x_target, t, e, b, target_idx=0, keepd
         predicted_noise = predicted_noise[0]
     
     # MSE loss between actual noise and predicted noise
+    # Normalize by volume size to prevent scaling issues
+    mse_loss = (e - predicted_noise).square()
+    
     if keepdim:
-        return (e - predicted_noise).square().sum(dim=(1, 2, 3, 4))
+        # Return per-sample loss, normalized by volume size
+        return mse_loss.view(mse_loss.size(0), -1).mean(dim=1)
     else:
-        return (e - predicted_noise).square().sum(dim=(1, 2, 3, 4)).mean(dim=0)
+        # Return scalar loss, properly normalized
+        return mse_loss.mean()
 
 
 # 3D versions of existing loss functions
@@ -135,11 +140,15 @@ def sg_noise_estimation_loss_3d(model, x_img, x_gt, t, e, b, keepdim=False):
     if isinstance(output, tuple):
         output = output[0]
     
-    # Compute MSE loss
+    # Compute MSE loss with proper normalization
+    mse_loss = (e - output).square()
+    
     if keepdim:
-        return (e - output).square().sum(dim=(1, 2, 3, 4))
+        # Return per-sample loss, normalized by volume size
+        return mse_loss.view(mse_loss.size(0), -1).mean(dim=1)
     else:
-        return (e - output).square().sum(dim=(1, 2, 3, 4)).mean(dim=0)
+        # Return scalar loss, properly normalized
+        return mse_loss.mean()
 
 
 def sr_noise_estimation_loss_3d(model, x_bw, x_md, x_fw, t, e, b, keepdim=False):
@@ -162,11 +171,15 @@ def sr_noise_estimation_loss_3d(model, x_bw, x_md, x_fw, t, e, b, keepdim=False)
     if isinstance(output, tuple):
         output = output[0]
     
-    # Compute MSE loss
+    # Compute MSE loss with proper normalization
+    mse_loss = (e - output).square()
+    
     if keepdim:
-        return (e - output).square().sum(dim=(1, 2, 3, 4))
+        # Return per-sample loss, normalized by volume size
+        return mse_loss.view(mse_loss.size(0), -1).mean(dim=1)
     else:
-        return (e - output).square().sum(dim=(1, 2, 3, 4)).mean(dim=0)
+        # Return scalar loss, properly normalized
+        return mse_loss.mean()
 
 
 loss_registry = {

@@ -59,6 +59,25 @@ def parse_args():
     return parser.parse_args()
 
 
+def monitor_scaler_health(scaler, step):
+    """Monitor gradient scaler health and adjust if needed"""
+    scale = scaler.get_scale()
+    
+    # Log warnings for problematic scaling
+    if scale < 1.0:
+        logging.warning(f"Low gradient scale detected: {scale:.2e} at step {step}")
+    elif scale > 65536.0:  # 2^16
+        logging.warning(f"High gradient scale detected: {scale:.2e} at step {step}")
+    
+    # Force scale adjustment if it's too extreme
+    if scale < 0.5:
+        logging.info(f"Forcing gradient scale increase from {scale:.2e}")
+        scaler.update(new_scale=2.0)
+    elif scale > 131072.0:  # 2^17
+        logging.info(f"Forcing gradient scale decrease from {scale:.2e}")
+        scaler.update(new_scale=16384.0)  # 2^14
+
+
 def dict2namespace(config):
     """Convert dictionary to namespace object"""
     namespace = argparse.Namespace()
@@ -428,7 +447,21 @@ def main():
     num_timesteps = betas.shape[0]
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
-    scaler = GradScaler()
+    
+    # Initialize gradient scaler with config settings
+    init_scale = getattr(config.training, 'loss_scale_init', 2048.0)
+    growth_interval = getattr(config.training, 'loss_scale_growth', 2000)
+    backoff_factor = getattr(config.training, 'loss_scale_backoff', 0.5)
+    
+    scaler = GradScaler(
+        init_scale=init_scale,
+        growth_factor=2.0,
+        backoff_factor=backoff_factor,
+        growth_interval=growth_interval
+    )
+    
+    logging.info(f"Initialized GradScaler with init_scale={init_scale}, "
+                 f"growth_interval={growth_interval}, backoff_factor={backoff_factor}")
     
     # Get fixed batch for sample logging
     fixed_val_batch = None
@@ -498,8 +531,7 @@ def main():
                 
                 with autocast():
                     loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
-                    # Scale loss for gradient accumulation
-                    loss = loss / gradient_accumulation_steps
+                    # Don't scale loss here - let gradient accumulation handle it naturally
                 
                 # Check for NaN/Inf loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -510,8 +542,17 @@ def main():
                         raise ValueError("NaN/Inf loss - stopping training")
                     continue  # Skip this batch
                 
-                scaler.scale(loss).backward()
-                accumulated_loss += loss.item()
+                # Additional safety check for extreme loss values
+                loss_value = loss.item()
+                if loss_value > 1000.0:
+                    logging.warning(f"Very large loss detected: {loss_value:.6f} - possible scaling issue")
+                elif loss_value < 1e-8:
+                    logging.warning(f"Very small loss detected: {loss_value:.6e} - possible underflow")
+                
+                # Scale loss for gradient accumulation BEFORE backward pass
+                scaled_loss = loss / gradient_accumulation_steps
+                scaler.scale(scaled_loss).backward()
+                accumulated_loss += loss.item()  # Accumulate the original (unscaled) loss for logging
                 accumulation_steps += 1
                 
                 # Step optimizer when we've accumulated enough gradients
@@ -525,20 +566,24 @@ def main():
                     scaler.step(optimizer)
                     scaler.update()
                     
+                    # Monitor gradient scaler health
+                    if global_step % 100 == 0:  # Check every 100 steps
+                        monitor_scaler_health(scaler, global_step)
+                    
                     # Move scheduler step here to avoid the warning
                     # scheduler.step()  # Comment out - we'll do this at end of epoch instead
                     
                     # Now we've completed one effective training step
                     global_step += 1
                     
-                    # Log the accumulated loss (this represents the true effective batch loss)
-                    true_loss = accumulated_loss
-                    epoch_loss += true_loss
+                    # Calculate average loss over accumulation steps
+                    average_loss = accumulated_loss / gradient_accumulation_steps
+                    epoch_loss += average_loss
                     
                     step_time = time.time() - step_start_time
                     
                     pbar.set_postfix({
-                        'loss': f'{true_loss:.6f}',
+                        'loss': f'{average_loss:.6f}',
                         'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
                         'target': f'{target_idx}',
                         'step': global_step,
@@ -548,7 +593,7 @@ def main():
                     # W&B logging
                     if use_wandb:
                         wandb.log({
-                            'train/loss': true_loss,
+                            'train/loss': average_loss,
                             'train/learning_rate': optimizer.param_groups[0]["lr"],
                             'train/epoch': epoch,
                             'train/step': global_step,
@@ -567,7 +612,7 @@ def main():
                     if global_step % args.log_every_n_steps == 0:
                         logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
                                      f'Step {global_step} - '
-                                     f'Loss: {true_loss:.6f}, '
+                                     f'Loss: {average_loss:.6f}, '
                                      f'Target: {target_idx}, '
                                      f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
                                      f'Time: {step_time:.2f}s')
@@ -578,7 +623,7 @@ def main():
                     
                     if global_step % save_every == 0:
                         save_checkpoint(
-                            model, optimizer, scaler, global_step, epoch, true_loss, 
+                            model, optimizer, scaler, global_step, epoch, average_loss, 
                             config, os.path.join(log_dir, f'ckpt_{global_step}.pth')
                         )
                         logging.info(f'Saved checkpoint at step {global_step} (save_every={save_every})')

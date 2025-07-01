@@ -35,6 +35,11 @@ training:
     log_every_n_steps: 50
     # Gradient accumulation will be controlled via command line argument
     
+    # Loss scaling settings for stability
+    loss_scale_init: 2048.0    # Initial loss scale (lower than default 65536)
+    loss_scale_growth: 2000    # Steps between scale increases
+    loss_scale_backoff: 0.5    # Scale reduction factor on overflow
+    
 optim:
     weight_decay: 0.0
     optimizer: "Adam"
