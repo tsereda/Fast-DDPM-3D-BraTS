@@ -5,9 +5,9 @@ data:
     num_workers: 4
 
 model:
-    type: "unified_4to4"  # Keep name for compatibility, but actually 4→1
+    type: "unified_4to1"  # Corrected: 4 input modalities → 1 target modality
     in_channels: 4        # Input: all 4 modalities
-    out_ch: 1            # Output: single target modality (FIXED)
+    out_ch: 1            # Output: single target modality
     ch: 64               # Reduced for 3D memory constraints
     ch_mult: [1, 2, 4]   # Reduced depth for 3D
     num_res_blocks: 2
