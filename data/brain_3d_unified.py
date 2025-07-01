@@ -244,8 +244,6 @@ class BraTS3DUnifiedDataset(Dataset):
         assert target_volume.shape == self.volume_size, \
             f"Target shape mismatch: {target_volume.shape} vs expected {self.volume_size}"
         
-        # REMOVED DEBUG PRINTS - these were causing issues and slowing training
-        
         return {
             'input': input_modalities,  # [4, H, W, D]
             'target': target_volume,    # [H, W, D]

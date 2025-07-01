@@ -27,11 +27,12 @@ def nonlinearity(x):
 
 def Normalize(in_channels, num_groups=32):
     """
-    Adaptive GroupNorm that finds a suitable number of groups.
+    FIXED: Adaptive GroupNorm that finds a suitable number of groups.
     """
     if in_channels == 0:
         return nn.Identity()
 
+    # FIXED: Find best divisor close to desired num_groups
     best_divisor = min(num_groups, in_channels)
     while in_channels % best_divisor != 0 and best_divisor > 1:
         best_divisor -= 1
