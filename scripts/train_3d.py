@@ -206,14 +206,12 @@ def validate_model(model, val_loader, device, betas, t_intervals):
 
 @torch.no_grad()
 def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
-    """Enhanced sample logging to W&B with comprehensive comparison view"""
+    """Simple W&B logging with all modalities in one compact view"""
     if not WANDB_AVAILABLE:
         return
         
     try:
         import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-        from matplotlib.gridspec import GridSpec
         
         model.eval()
         
@@ -248,239 +246,58 @@ def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
             x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
             img = x0_t.clamp(-1.0, 1.0)
         
-        # Prepare data for visualization
-        slice_idx = img.shape[-1] // 2  # Middle slice
+        # Get middle slice for all modalities
+        slice_idx = img.shape[-1] // 2
         modality_names = ['T1n', 'T1c', 'T2w', 'T2f']
         
-        # Get all modality slices (normalized to [0,1])
-        input_slices = []
+        # Collect all slices: 4 inputs + generated + target
+        all_slices = []
+        titles = []
+        
+        # Input modalities
         for i in range(4):
             slice_data = (inputs[0, i, :, :, slice_idx].cpu().numpy() + 1) / 2
-            input_slices.append(slice_data)
+            all_slices.append(slice_data)
+            marker = " ⭐" if i == target_idx else ""
+            titles.append(f'{modality_names[i]}{marker}')
         
+        # Generated
         generated_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        all_slices.append(generated_slice)
+        titles.append(f'Generated')
+        
+        # Target
         target_slice = (targets[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        all_slices.append(target_slice)
+        titles.append(f'Ground Truth')
         
-        # Create comprehensive comparison figure
-        fig = plt.figure(figsize=(20, 12))
-        gs = GridSpec(3, 4, figure=fig, hspace=0.3, wspace=0.2)
+        # Create single row figure with all 6 images
+        fig, axes = plt.subplots(1, 6, figsize=(18, 3))
+        fig.suptitle(f'Step {step} | Target: {modality_names[target_idx]}', fontsize=14)
         
-        # Title
-        fig.suptitle(f'BraTS Modality Synthesis - Step {step}\nTarget: {modality_names[target_idx]}', 
-                    fontsize=16, fontweight='bold')
+        # Plot all slices
+        for i, (slice_data, title) in enumerate(zip(all_slices, titles)):
+            axes[i].imshow(slice_data, cmap='gray', vmin=0, vmax=1)
+            axes[i].set_title(title, fontsize=10)
+            axes[i].axis('off')
         
-        # Top row: Input modalities (4 columns)
-        for i in range(4):
-            ax = fig.add_subplot(gs[0, i])
-            im = ax.imshow(input_slices[i], cmap='gray', vmin=0, vmax=1)
-            
-            # Highlight target modality with colored border
-            if i == target_idx:
-                # Add red border for target modality
-                rect = patches.Rectangle((0, 0), input_slices[i].shape[1]-1, input_slices[i].shape[0]-1, 
-                                       linewidth=4, edgecolor='red', facecolor='none')
-                ax.add_patch(rect)
-                ax.set_title(f'{modality_names[i]}\n(TARGET - Masked)', fontsize=12, fontweight='bold', color='red')
-            else:
-                ax.set_title(f'{modality_names[i]}\n(Input)', fontsize=12, fontweight='bold')
-            
-            ax.axis('off')
-            # Add colorbar for each input
-            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        # Use subplots_adjust instead of tight_layout to avoid warning
+        plt.subplots_adjust(top=0.8, bottom=0.1, left=0.05, right=0.95, wspace=0.1)
         
-        # Middle row: Generated vs Target comparison
-        ax_gen = fig.add_subplot(gs[1, 1])
-        im_gen = ax_gen.imshow(generated_slice, cmap='gray', vmin=0, vmax=1)
-        ax_gen.set_title(f'Generated {modality_names[target_idx]}', fontsize=14, fontweight='bold', color='blue')
-        ax_gen.axis('off')
-        plt.colorbar(im_gen, ax=ax_gen, fraction=0.046, pad=0.04)
-        
-        ax_target = fig.add_subplot(gs[1, 2])
-        im_target = ax_target.imshow(target_slice, cmap='gray', vmin=0, vmax=1)
-        ax_target.set_title(f'Ground Truth {modality_names[target_idx]}', fontsize=14, fontweight='bold', color='green')
-        ax_target.axis('off')
-        plt.colorbar(im_target, ax=ax_target, fraction=0.046, pad=0.04)
-        
-        # Bottom row: Difference map and metrics
-        difference = np.abs(generated_slice - target_slice)
-        ax_diff = fig.add_subplot(gs[2, :2])
-        im_diff = ax_diff.imshow(difference, cmap='hot', vmin=0, vmax=1)
-        ax_diff.set_title('Absolute Difference Map', fontsize=14, fontweight='bold')
-        ax_diff.axis('off')
-        plt.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
-        
-        # Metrics panel
-        ax_metrics = fig.add_subplot(gs[2, 2:])
-        ax_metrics.axis('off')
-        
-        # Calculate metrics
-        mse_loss = F.mse_loss(img, targets).item()
-        mae_loss = F.l1_loss(img, targets).item()
-        
-        # Calculate PSNR and SSIM for the slice
-        psnr_val = -10 * np.log10(np.mean((generated_slice - target_slice) ** 2) + 1e-8)
-        
-        # Simple SSIM calculation with fallback
-        try:
-            from skimage.metrics import structural_similarity as ssim
-            ssim_val = ssim(target_slice, generated_slice, data_range=1.0)
-        except ImportError:
-            # Fallback SSIM calculation
-            def simple_ssim(img1, img2):
-                mu1, mu2 = img1.mean(), img2.mean()
-                sigma1, sigma2 = img1.var(), img2.var()
-                sigma12 = ((img1 - mu1) * (img2 - mu2)).mean()
-                c1, c2 = 0.01**2, 0.03**2
-                ssim = ((2*mu1*mu2 + c1) * (2*sigma12 + c2)) / ((mu1**2 + mu2**2 + c1) * (sigma1 + sigma2 + c2))
-                return max(0, min(1, ssim))
-            ssim_val = simple_ssim(target_slice, generated_slice)
-        
-        metrics_text = f"""
-        METRICS (Full Volume):
-        ━━━━━━━━━━━━━━━━━━━━
-        MSE Loss: {mse_loss:.6f}
-        MAE Loss: {mae_loss:.6f}
-        
-        METRICS (Current Slice):
-        ━━━━━━━━━━━━━━━━━━━━━━
-        PSNR: {psnr_val:.2f} dB
-        SSIM: {ssim_val:.4f}
-        
-        TRAINING INFO:
-        ━━━━━━━━━━━━━━━━
-        Step: {step}
-        Target Modality: {modality_names[target_idx]}
-        Slice: {slice_idx} / {img.shape[-1]}
-        """
-        
-        ax_metrics.text(0.05, 0.95, metrics_text, transform=ax_metrics.transAxes, 
-                       fontsize=11, verticalalignment='top', fontfamily='monospace',
-                       bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))
-        
-        # Save the figure and log to W&B
-        plt.tight_layout()
-        
-        # Log comprehensive comparison
+        # Log to wandb as a single image
         wandb.log({
-            "samples/comprehensive_comparison": wandb.Image(fig, caption=f"Complete BraTS synthesis comparison - Step {step}"),
-            "samples/metrics/mse": mse_loss,
-            "samples/metrics/mae": mae_loss,
-            "samples/metrics/psnr_slice": psnr_val,
-            "samples/metrics/ssim_slice": ssim_val,
-            "samples/target_modality": modality_names[target_idx],
-            "samples/target_idx": target_idx,
-        }, step=step)
-        
-        # Also log individual images for backwards compatibility
-        wandb.log({
-            "samples/generated_slice": wandb.Image(generated_slice, caption=f"Generated {modality_names[target_idx]}"),
-            "samples/target_slice": wandb.Image(target_slice, caption=f"Target {modality_names[target_idx]}"),
-            "samples/difference_map": wandb.Image(difference, caption="Absolute Difference"),
-        }, step=step)
-        
-        # Log input modalities separately
-        input_log = {}
-        for i, name in enumerate(modality_names):
-            input_log[f"samples/inputs/{name.lower()}"] = wandb.Image(input_slices[i], caption=f"Input {name}")
-        wandb.log(input_log, step=step)
-        
-        plt.close(fig)  # Clean up
-        model.train()
-        
-    except Exception as e:
-        logging.warning(f"Sample logging failed: {e}")
-        import traceback
-        logging.warning(f"Traceback: {traceback.format_exc()}")
-        model.train()
-
-
-def log_multi_slice_comparison_to_wandb(model, batch, t_intervals, betas, device, step):
-    """Log multi-slice comparison for comprehensive 3D visualization"""
-    if not WANDB_AVAILABLE:
-        return
-        
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.gridspec import GridSpec
-        
-        model.eval()
-        
-        # Get batch data
-        inputs = batch['input'].to(device)    # [1, 4, H, W, D]
-        targets = batch['target'].to(device)  # [1, H, W, D]
-        targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
-        target_idx = batch['target_idx'][0].item()
-        
-        # Generate sample
-        shape = targets.shape
-        img = torch.randn(shape, device=device)
-        model_input = inputs.clone()
-        model_input[:, target_idx:target_idx+1] = img
-        
-        # Quick sampling
-        seq = t_intervals[-3:].cpu().numpy()  # Even fewer steps for multi-slice
-        
-        for i in reversed(seq):
-            t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-            model_input[:, target_idx:target_idx+1] = img
-            
-            et = model(model_input, t.float())
-            if isinstance(et, tuple):
-                et = et[0]
-            
-            alpha_cumprod_t = (1 - betas).cumprod(dim=0)[i].view(1, 1, 1, 1, 1)
-            x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
-            img = x0_t.clamp(-1.0, 1.0)
-        
-        # Select 5 evenly spaced slices
-        depth = img.shape[-1]
-        slice_indices = [depth//6, depth//4, depth//2, 3*depth//4, 5*depth//6]
-        modality_names = ['T1n', 'T1c', 'T2w', 'T2f']
-        
-        # Create multi-slice comparison
-        fig = plt.figure(figsize=(25, 15))
-        gs = GridSpec(3, 5, figure=fig, hspace=0.3, wspace=0.15)
-        
-        fig.suptitle(f'Multi-Slice BraTS Synthesis - {modality_names[target_idx]} - Step {step}', 
-                    fontsize=18, fontweight='bold')
-        
-        for col, slice_idx in enumerate(slice_indices):
-            # Generated
-            ax_gen = fig.add_subplot(gs[0, col])
-            gen_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
-            ax_gen.imshow(gen_slice, cmap='gray', vmin=0, vmax=1)
-            ax_gen.set_title(f'Generated\nSlice {slice_idx}', fontsize=11, fontweight='bold')
-            ax_gen.axis('off')
-            
-            # Target
-            ax_target = fig.add_subplot(gs[1, col])
-            target_slice = (targets[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
-            ax_target.imshow(target_slice, cmap='gray', vmin=0, vmax=1)
-            ax_target.set_title(f'Ground Truth\nSlice {slice_idx}', fontsize=11, fontweight='bold')
-            ax_target.axis('off')
-            
-            # Difference
-            ax_diff = fig.add_subplot(gs[2, col])
-            diff_slice = np.abs(gen_slice - target_slice)
-            im_diff = ax_diff.imshow(diff_slice, cmap='hot', vmin=0, vmax=1)
-            ax_diff.set_title(f'Difference\nMAE: {diff_slice.mean():.4f}', fontsize=11, fontweight='bold')
-            ax_diff.axis('off')
-            
-            # Add colorbar for difference maps
-            plt.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
-        
-        plt.tight_layout()
-        
-        # Log multi-slice comparison
-        wandb.log({
-            "samples/multi_slice_comparison": wandb.Image(fig, caption=f"Multi-slice comparison - {modality_names[target_idx]} - Step {step}"),
+            "samples": wandb.Image(fig),
+            "step": step,
+            "target_modality": modality_names[target_idx]
         }, step=step)
         
         plt.close(fig)
         model.train()
         
     except Exception as e:
-        logging.warning(f"Multi-slice logging failed: {e}")
+        logging.warning(f"Sample logging failed: {e}")
+        import traceback
+        logging.warning(f"Traceback: {traceback.format_exc()}")
         model.train()
 
 
@@ -880,10 +697,9 @@ def main():
                             device,
                             global_step
                         )
-                        
-                        # Multi-slice comparison every 10,000 steps (less frequent for performance)
-                        if global_step % (args.sample_every * 5) == 0:
-                            log_multi_slice_comparison_to_wandb(
+                        # Log samples to W&B with all modalities in one compact view
+                        if fixed_val_batch is not None:
+                            log_samples_to_wandb(
                                 model.module if isinstance(model, nn.DataParallel) else model,
                                 fixed_val_batch,
                                 t_intervals,
