@@ -27,29 +27,30 @@ diffusion:
 training:
     batch_size: 1        # Small batch size for 3D
     epochs: 1000
-    learning_rate: 0.0001 
+    learning_rate: 0.00005   # Further reduced for stability
     weight_decay: 0.0
-    gradient_clip: 1.0
+    gradient_clip: 0.5       # Reduced gradient clipping for better stability
     save_every: 2000     # Save checkpoint every 2000 training steps (less frequent)
     validate_every: 1000 # Validate every 1000 training steps
     log_every_n_steps: 50
     # Gradient accumulation will be controlled via command line argument
     
-    # Loss scaling settings for stability
-    loss_scale_init: 2048.0    # Initial loss scale (lower than default 65536)
-    loss_scale_growth: 2000    # Steps between scale increases
-    loss_scale_backoff: 0.5    # Scale reduction factor on overflow
+    # Loss scaling settings for stability - more conservative
+    loss_scale_init: 512.0     # Much lower initial scale
+    loss_scale_growth: 1000    # More frequent growth checks
+    loss_scale_backoff: 0.25   # More aggressive scale reduction on overflow
     
 optim:
     weight_decay: 0.0
     optimizer: "Adam"
-    lr: 0.00001  # REDUCED from 0.0001
+    lr: 0.000025  # Further reduced to match training.learning_rate
     beta1: 0.9
     amsgrad: false
     eps: 0.00000001
 
 # Additional stability settings
 stability:
-    warmup_steps: 1000          # Gradual learning rate warmup
-    memory_cleanup_interval: 100 # Clear GPU cache every N steps
-    nan_check_interval: 50      # Check for NaN values in loss/gradients
+    warmup_steps: 500           # Reduced warmup for faster convergence
+    memory_cleanup_interval: 50 # More frequent cleanup for stability
+    nan_check_interval: 25      # More frequent NaN checks
+    max_loss_threshold: 500.0   # Alert threshold for large losses
