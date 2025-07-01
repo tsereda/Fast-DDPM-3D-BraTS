@@ -30,8 +30,8 @@ training:
     learning_rate: 0.00001  # REDUCED from 0.0001 for stability with small batch
     weight_decay: 0.0
     gradient_clip: 1.0
-    save_every: 1000
-    validate_every: 500
+    save_every: 2000     # Save checkpoint every 2000 training steps (less frequent)
+    validate_every: 1000 # Validate every 1000 training steps
     log_every_n_steps: 50
     # Gradient accumulation will be controlled via command line argument
     
