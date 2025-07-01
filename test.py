@@ -40,7 +40,7 @@ def test_imports():
         return False
     
     try:
-        from functions.denoising_3d import unified_4to4_generalized_steps
+        from functions.denoising_3d import unified_4to1_generalized_steps_3d
         print("✅ Denoising functions import successful")
     except ImportError as e:
         print(f"❌ Denoising functions import failed: {e}")
@@ -336,12 +336,12 @@ def test_denoising_improvements():
     print("="*60)
     
     try:
-        from functions.denoising_3d import unified_4to4_generalized_steps
+        from functions.denoising_3d import unified_4to1_generalized_steps_3d
         
         # This is a more complex test - we'll just check that the function exists
         # and has the expected signature
         import inspect
-        sig = inspect.signature(unified_4to4_generalized_steps)
+        sig = inspect.signature(unified_4to1_generalized_steps_3d)
         print(f"✅ Denoising function signature: {sig}")
         
         # Test smart channel selection logic

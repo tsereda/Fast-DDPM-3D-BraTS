@@ -27,8 +27,8 @@ except ImportError:
 # Import required modules
 try:
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import unified_4to4_loss, calculate_psnr
-    from functions.denoising_3d import unified_4to4_generalized_steps
+    from functions.losses import unified_4to1_loss, calculate_psnr
+    from functions.denoising_3d import unified_4to1_generalized_steps_3d
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     print("✓ Successfully imported 3D components")
 except ImportError as e:
@@ -196,7 +196,7 @@ def validate_model(model, val_loader, device, betas, t_intervals):
             t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
             
-            loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+            loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
@@ -206,11 +206,13 @@ def validate_model(model, val_loader, device, betas, t_intervals):
 
 @torch.no_grad()
 def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
-    """Simplified sample logging to W&B"""
+    """Simple W&B logging with all modalities in one compact view"""
     if not WANDB_AVAILABLE:
         return
         
     try:
+        import matplotlib.pyplot as plt
+        
         model.eval()
         
         # Get batch data
@@ -223,7 +225,7 @@ def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
         shape = targets.shape
         img = torch.randn(shape, device=device)
         
-        # Use the unified 4->4 sampling approach
+        # Use the unified 4->1 sampling approach
         model_input = inputs.clone()
         model_input[:, target_idx:target_idx+1] = img
         
@@ -244,23 +246,58 @@ def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
             x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
             img = x0_t.clamp(-1.0, 1.0)
         
-        # Log middle slice for visualization
+        # Get middle slice for all modalities
         slice_idx = img.shape[-1] // 2
-        generated_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
-        target_slice = (targets[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        modality_names = ['T1n', 'T1c', 'T2w', 'T2f']
         
-        # Log to W&B
+        # Collect all slices: 4 inputs + generated + target
+        all_slices = []
+        titles = []
+        
+        # Input modalities
+        for i in range(4):
+            slice_data = (inputs[0, i, :, :, slice_idx].cpu().numpy() + 1) / 2
+            all_slices.append(slice_data)
+            marker = " ⭐" if i == target_idx else ""
+            titles.append(f'{modality_names[i]}{marker}')
+        
+        # Generated
+        generated_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        all_slices.append(generated_slice)
+        titles.append(f'Generated')
+        
+        # Target
+        target_slice = (targets[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        all_slices.append(target_slice)
+        titles.append(f'Ground Truth')
+        
+        # Create single row figure with all 6 images
+        fig, axes = plt.subplots(1, 6, figsize=(18, 3))
+        fig.suptitle(f'Step {step} | Target: {modality_names[target_idx]}', fontsize=14)
+        
+        # Plot all slices
+        for i, (slice_data, title) in enumerate(zip(all_slices, titles)):
+            axes[i].imshow(slice_data, cmap='gray', vmin=0, vmax=1)
+            axes[i].set_title(title, fontsize=10)
+            axes[i].axis('off')
+        
+        # Use subplots_adjust instead of tight_layout to avoid warning
+        plt.subplots_adjust(top=0.8, bottom=0.1, left=0.05, right=0.95, wspace=0.1)
+        
+        # Log to wandb as a single image
         wandb.log({
-            "samples/generated": wandb.Image(generated_slice, caption=f"Generated"),
-            "samples/target": wandb.Image(target_slice, caption=f"Ground Truth"),
-            "samples/target_idx": target_idx,
-            "samples/mse": F.mse_loss(img, targets).item(),
+            "samples": wandb.Image(fig),
+            "step": step,
+            "target_modality": modality_names[target_idx]
         }, step=step)
         
+        plt.close(fig)
         model.train()
         
     except Exception as e:
         logging.warning(f"Sample logging failed: {e}")
+        import traceback
+        logging.warning(f"Traceback: {traceback.format_exc()}")
         model.train()
 
 
@@ -530,7 +567,7 @@ def main():
                 e = torch.randn_like(targets)
                 
                 with autocast():
-                    loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                    loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                     # Don't scale loss here - let gradient accumulation handle it naturally
                 
                 # Check for NaN/Inf loss
@@ -660,6 +697,16 @@ def main():
                             device,
                             global_step
                         )
+                        # Log samples to W&B with all modalities in one compact view
+                        if fixed_val_batch is not None:
+                            log_samples_to_wandb(
+                                model.module if isinstance(model, nn.DataParallel) else model,
+                                fixed_val_batch,
+                                t_intervals,
+                                betas,
+                                device,
+                                global_step
+                            )
                 
                 # Clear GPU memory cache periodically
                 if (batch_idx + 1) % 10 == 0:

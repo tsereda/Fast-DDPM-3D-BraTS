@@ -16,8 +16,8 @@ from tqdm import tqdm
 sys.path.append('.')
 sys.path.append('..')
 
-from models.diffusion_3d import Model3D
-from functions.denoising_3d import generalized_steps_3d, unified_4to4_generalized_steps
+from models.fast_ddpm_3d import FastDDPM3D
+from functions.denoising_3d import generalized_steps_3d, unified_4to1_generalized_steps_3d
 from data.brain_3d_unified import BraTS3DUnifiedDataset
 from data.image_folder import get_available_3d_vol_names
 
@@ -171,9 +171,12 @@ def save_generated_volume(volume, affine, output_path):
     """Save generated volume as NIfTI"""
     volume_np = volume.cpu().numpy()
     
-    # Denormalize (simple approach)
+    # Denormalize from [-1, 1] to [0, 1] range
+    volume_np = (volume_np + 1) / 2
     volume_np = np.clip(volume_np, 0, 1)
-    volume_np = (volume_np * 255).astype(np.uint8)
+    
+    # Scale to appropriate intensity range (0-1000 for medical images)
+    volume_np = (volume_np * 1000).astype(np.float32)
     
     # Create NIfTI image
     nifti_img = nib.Nifti1Image(volume_np, affine)
@@ -196,7 +199,7 @@ def main():
     config = checkpoint['config']
     
     # Initialize model
-    model = Model3D(config).to(device)
+    model = FastDDPM3D(config).to(device)
     
     # Load weights
     if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
@@ -258,18 +261,23 @@ def main():
             input_batch = input_tensor.unsqueeze(0).to(device)  # [1, 4, H, W, D]
             modality_mask_batch = modality_mask.unsqueeze(0).to(device)  # [1, 4]
             
+            # Determine target modality index
+            modality_order = ['t1n', 't1c', 't2w', 't2f']
+            target_idx = modality_order.index(args.target_modality)
+            
             # Initial noise
             noise_shape = (1, 1, *volume_size)
             x = torch.randn(noise_shape).to(device)
             
             print(f"Input shape: {input_batch.shape}")
             print(f"Noise shape: {x.shape}")
+            print(f"Target index: {target_idx}")
             
             with torch.no_grad():
-                # Sampling
+                # Sampling - corrected function call
                 print("Generating...")
-                xs, x0_preds = unified_4to4_generalized_steps(
-                    x, input_batch, modality_mask_batch, seq, model, betas, eta=args.eta
+                xs, x0_preds = unified_4to1_generalized_steps_3d(
+                    x, input_batch, target_idx, seq, model, betas, eta=args.eta
                 )
                 
                 # Get final result
