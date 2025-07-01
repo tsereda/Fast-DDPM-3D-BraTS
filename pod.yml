@@ -7,6 +7,7 @@ metadata:
 spec:
   nodeSelector:
     topology.kubernetes.io/region: us-west
+    nautilus.io/linstor: "true"
   
   containers:
     - name: brats-processing
@@ -46,7 +47,7 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          git clone -b dev3 https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          git clone -b dev4 https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           
           sudo apt-get update && sudo apt-get install -y p7zip-full wget git
@@ -73,7 +74,8 @@ spec:
             --use_wandb \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
-            --doc pod-training-$(date +%Y%m%d-%H%M%S)
+            --doc pod-training-$(date +%Y%m%d-%H%M%S) \
+            --sample_every 50
           
           tail -f /dev/null
       
