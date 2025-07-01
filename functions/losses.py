@@ -33,18 +33,21 @@ def extract(a, t, x_shape):
 def q_posterior_mean_variance(x_start, x_t, alpha_t, alpha_prev):
     """
     Compute posterior mean and variance for diffusion process q(x_{t-1} | x_t, x_0).
-    Note: The formulas used here appear to be simplifications of the ones in the original DDPM paper.
+    Uses the correct DDPM formulas from Ho et al. 2020.
     """
-    # Compute posterior mean
+    # Convert alphas to betas for the correct formula
+    beta_t = 1.0 - alpha_t / alpha_prev
+    beta_t = beta_t.clamp(min=1e-8, max=0.999)  # Prevent numerical issues
+    
+    # Correct posterior mean formula from DDPM paper
     posterior_mean = (
-        alpha_prev.sqrt() * x_start +
-        (1 - alpha_prev).sqrt() * x_t
-    ) / (1 - alpha_t).sqrt()
+        (alpha_prev.sqrt() * beta_t * x_start + 
+         alpha_t.sqrt() * (1.0 - alpha_prev) * x_t) / 
+        (1.0 - alpha_t)
+    )
 
-    # Compute posterior variance
-    # FIX: The original line `(1 - alpha_prev) * (1 - alpha_t) / (1 - alpha_t)` was redundant.
-    # This is arithmetically equivalent and cleaner.
-    posterior_variance = (1 - alpha_prev)
+    # Correct posterior variance formula from DDPM paper
+    posterior_variance = beta_t * (1.0 - alpha_prev) / (1.0 - alpha_t)
     posterior_variance = posterior_variance.clamp(min=1e-20)
     posterior_log_variance = torch.log(posterior_variance)
 
@@ -60,13 +63,16 @@ def normal_kl(mean1, logvar1, mean2, logvar2):
 
 
 def discretized_gaussian_log_likelihood(x, means, log_scales):
-    """Compute log likelihood for discretized Gaussian"""
+    """Compute log likelihood for discretized Gaussian - adapted for [-1, 1] normalized data"""
     assert x.shape == means.shape == log_scales.shape
     centered_x = x - means
     inv_stdv = torch.exp(-log_scales)
-    plus_in = inv_stdv * (centered_x + 1.0 / 255.0)
+    # Adapt discretization for [-1, 1] range instead of [0, 255]
+    # Use 1/127.5 as the discretization step for [-1, 1] -> [0, 255] mapping
+    discretization_step = 1.0 / 127.5
+    plus_in = inv_stdv * (centered_x + discretization_step)
     cdf_plus = torch.distributions.Normal(0, 1).cdf(plus_in)
-    min_in = inv_stdv * (centered_x - 1.0 / 255.0)
+    min_in = inv_stdv * (centered_x - discretization_step)
     cdf_min = torch.distributions.Normal(0, 1).cdf(min_in)
     log_cdf_plus = torch.log(cdf_plus.clamp(min=1e-12))
     log_one_minus_cdf_min = torch.log((1.0 - cdf_min).clamp(min=1e-12))
@@ -293,17 +299,17 @@ def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8, target_i
 
     # L1 loss for additional regularization
     with torch.no_grad():
-        # Get model prediction for x0
-        sqrt_alphas_cumprod = torch.sqrt(1.0 - betas).cumprod(dim=0)
-        sqrt_one_minus_alphas_cumprod = torch.sqrt(betas.cumsum(dim=0))
+        # Get correct alpha values - fix the computation
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+        sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
 
-        # FIX: Ensure t_clamped is a LongTensor for indexing.
-        t_clamped = torch.clamp(t, 0, len(betas) - 1).long()
+        # Extract values at timestep t using the correct extract function
+        sqrt_a_t = extract(sqrt_alphas_cumprod, t, x_target.shape)
+        sqrt_one_minus_a_t = extract(sqrt_one_minus_alphas_cumprod, t, x_target.shape)
 
-        a_t_sqrt = sqrt_alphas_cumprod[t_clamped].view(-1, 1, 1, 1, 1)
-        sqrt_one_minus_a_t = sqrt_one_minus_alphas_cumprod[t_clamped].view(-1, 1, 1, 1, 1)
-
-        x_noisy = x_target * a_t_sqrt + e * sqrt_one_minus_a_t
+        x_noisy = x_target * sqrt_a_t + e * sqrt_one_minus_a_t
 
         model_input = x_available.clone()
         if target_idx is not None:
@@ -316,7 +322,8 @@ def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8, target_i
             pred = pred[0]
 
         # Predict x0 from the noise prediction
-        x0_pred = (x_noisy - sqrt_one_minus_a_t * pred) / a_t_sqrt
+        x0_pred = (x_noisy - sqrt_one_minus_a_t * pred) / (sqrt_a_t + 1e-8)
+        x0_pred = torch.clamp(x0_pred, -1, 1)
         l1_loss = torch.nn.functional.l1_loss(x0_pred, x_target)
 
     return alpha * main_loss + (1 - alpha) * l1_loss
