@@ -297,7 +297,7 @@ def validate_model(model, val_loader, device, betas, t_intervals):
             t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
             
-            loss = unified_4to4_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
+            loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
@@ -598,15 +598,16 @@ def main():
                 
                 with autocast():
                     # SIMPLIFIED: Use only the simple 3D loss
-                    loss = unified_4to4_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
+                    loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                 
                 scaler.scale(loss).backward()
                 
-                if hasattr(config.training, 'gradient_clip'):
-                    scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip)
-                else:
-                    grad_norm = 0.0
+                scaler.unscale_(optimizer)
+                # Always compute gradient norm for monitoring
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), 
+                    max_norm=getattr(config.training, 'gradient_clip', float('inf'))
+                )
                 
                 scaler.step(optimizer)
                 scaler.update()

@@ -32,10 +32,9 @@ def Normalize(in_channels, num_groups=32):
     if in_channels == 0:
         return nn.Identity()
 
-    best_divisor = 1
-    for i in range(1, num_groups + 1):
-        if in_channels % i == 0:
-            best_divisor = i
+    best_divisor = min(num_groups, in_channels)
+    while in_channels % best_divisor != 0 and best_divisor > 1:
+        best_divisor -= 1
     
     return torch.nn.GroupNorm(num_groups=best_divisor, num_channels=in_channels, eps=1e-6, affine=True)
 
