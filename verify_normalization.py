@@ -45,7 +45,7 @@ def test_utils_normalization():
     from utils.crop_and_pad_volume import normalise_image
     
     # Test volume
-    test_volume = torch.exponential(torch.ones(32, 32, 32) * 0.01)
+    test_volume = torch.rand(32, 32, 32) * 100 + 50  # Range [50, 150]
     
     # Test div_by_max normalization
     normalized = normalise_image(test_volume, norm_type='div_by_max')
