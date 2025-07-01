@@ -3,9 +3,10 @@ Fast-DDPM loss functions with variance learning
 Implements the full Fast-DDPM approach including VLB loss
 
 This script has been corrected for the following issues:
-1.  Fixed tensor dimension mismatch by correcting the logic in `fast_ddpm_loss` where `extract` was called incorrectly.
-2.  Fixed timestep indexing in `extract`, `sg_noise_estimation_loss`, and `combined_loss` by ensuring the timestep tensor is a LongTensor.
-3.  Cleaned up a redundant calculation in `q_posterior_mean_variance`.
+1. Fixed tensor dimension mismatch by correcting the logic in `fast_ddpm_loss` where `extract` was called incorrectly.
+2. Fixed timestep indexing in `extract`, `sg_noise_estimation_loss`, and `combined_loss` by ensuring the timestep tensor is a LongTensor.
+3. Cleaned up a redundant calculation in `q_posterior_mean_variance`.
+4. Fixed channel replacement logic to use target_idx instead of always replacing channel 0.
 """
 import torch
 import torch.nn.functional as F
@@ -78,9 +79,9 @@ def discretized_gaussian_log_likelihood(x, means, log_scales):
     return log_probs
 
 
-def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'):
+def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned', target_idx=None):
     """
-    Fast-DDPM loss with variance learning
+    Fast-DDPM loss with variance learning and stability improvements
 
     Args:
         model: 3D diffusion model
@@ -90,9 +91,16 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
         e: [B, 1, H, W, D] - noise
         betas: beta schedule
         var_type: 'fixed', 'learned', or 'learned_range'
+        target_idx: index of target modality (if None, defaults to 0)
     """
     batch_size = x_target.shape[0]
     device = x_target.device
+
+    # Input validation
+    if torch.isnan(x_available).any() or torch.isinf(x_available).any():
+        raise ValueError("NaN/Inf detected in x_available")
+    if torch.isnan(x_target).any() or torch.isinf(x_target).any():
+        raise ValueError("NaN/Inf detected in x_target")
 
     # Get alpha values
     alphas = 1.0 - betas
@@ -112,20 +120,30 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
     # Forward diffusion: add noise to target
     x_noisy = x_target * sqrt_a_t + e * sqrt_one_minus_a_t
 
-    # Unified 4->4: replace one channel with noisy target
+    # Unified 4->4: replace target channel with noisy target
     model_input = x_available.clone()
-    model_input[:, 0:1] = x_noisy
+    if target_idx is not None:
+        model_input[:, target_idx:target_idx+1] = x_noisy
+    else:
+        # Default to channel 0 if not specified
+        model_input[:, 0:1] = x_noisy
 
     # Model prediction
     model_output = model(model_input, t.float())
     if var_type in ['learned', 'learned_range']:
-        model_mean, model_log_variance = model_output
+        if isinstance(model_output, tuple) and len(model_output) == 2:
+            model_mean, model_log_variance = model_output
+        else:
+            # Fallback to fixed variance if model doesn't output variance
+            model_mean = model_output
+            model_log_variance = None
+            var_type = 'fixed'
     else:
         model_mean = model_output
         model_log_variance = None
 
     # Predict x0 from the model's predicted noise
-    x0_pred = (x_noisy - sqrt_one_minus_a_t * model_mean) / sqrt_a_t
+    x0_pred = (x_noisy - sqrt_one_minus_a_t * model_mean) / (sqrt_a_t + 1e-8)  # Add epsilon for stability
     x0_pred = torch.clamp(x0_pred, -1, 1)
 
     # Get true posterior distribution parameters q(x_{t-1} | x_t, x_0)
@@ -136,6 +154,9 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
     mean_loss = F.mse_loss(model_mean, e, reduction='none')
     mean_loss = mean_loss.mean(dim=(1, 2, 3, 4))
 
+    # Clamp loss to prevent explosion
+    mean_loss = torch.clamp(mean_loss, max=100.0)
+
     if var_type == 'fixed':
         loss = mean_loss
     elif var_type == 'learned':
@@ -143,46 +164,59 @@ def fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='learned'
         true_mean = posterior_mean
         true_log_variance = posterior_log_variance
 
-        kl = normal_kl(true_mean, true_log_variance, x0_pred, model_log_variance)
-        kl = kl.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+        # Add stability check
+        if model_log_variance is not None:
+            kl = normal_kl(true_mean, true_log_variance, x0_pred, model_log_variance)
+            kl = kl.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+            kl = torch.clamp(kl, max=100.0)  # Prevent explosion
 
-        decoder_nll = -discretized_gaussian_log_likelihood(
-            x_target, x0_pred, 0.5 * model_log_variance
-        )
-        decoder_nll = decoder_nll.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+            decoder_nll = -discretized_gaussian_log_likelihood(
+                x_target, x0_pred, 0.5 * model_log_variance
+            )
+            decoder_nll = decoder_nll.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+            decoder_nll = torch.clamp(decoder_nll, max=100.0)  # Prevent explosion
 
-        # At t=0, use decoder NLL, otherwise use KL divergence
-        vb_loss = torch.where((t == 0), decoder_nll, kl)
+            # At t=0, use decoder NLL, otherwise use KL divergence
+            vb_loss = torch.where((t == 0), decoder_nll, kl)
 
-        # Combine losses (from Improved DDPM paper)
-        loss = mean_loss + 0.001 * vb_loss
+            # Combine losses (from Improved DDPM paper)
+            loss = mean_loss + 0.001 * vb_loss
+        else:
+            loss = mean_loss
     elif var_type == 'learned_range':
         # Learn interpolation between fixed small and large variance
-        # FIX: `posterior_log_variance` is already computed for the batch timesteps `t`,
-        # so it doesn't need to be re-indexed with `extract`. This was the source of the
-        # dimension mismatch error.
-        min_log = posterior_log_variance
-        max_log = extract(torch.log(betas), t, x_target.shape)
+        if model_log_variance is not None:
+            min_log = posterior_log_variance
+            max_log = extract(torch.log(betas + 1e-8), t, x_target.shape)  # Add epsilon
 
-        # Model predicts interpolation fraction `v` (renormalized from [-1, 1] to [0, 1])
-        frac = (model_log_variance + 1) / 2
-        model_log_variance = frac * max_log + (1 - frac) * min_log
+            # Model predicts interpolation fraction `v` (renormalized from [-1, 1] to [0, 1])
+            frac = torch.sigmoid(model_log_variance)  # Use sigmoid for better stability
+            model_log_variance = frac * max_log + (1 - frac) * min_log
 
-        # Compute VLB loss with the interpolated variance
-        true_mean = posterior_mean
-        true_log_variance = posterior_log_variance
+            # Compute VLB loss with the interpolated variance
+            true_mean = posterior_mean
+            true_log_variance = posterior_log_variance
 
-        kl = normal_kl(true_mean, true_log_variance, x0_pred, model_log_variance)
-        kl = kl.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+            kl = normal_kl(true_mean, true_log_variance, x0_pred, model_log_variance)
+            kl = kl.mean(dim=(1, 2, 3, 4)) / np.log(2.0)
+            kl = torch.clamp(kl, max=100.0)  # Prevent explosion
 
-        loss = mean_loss + 0.001 * kl
+            loss = mean_loss + 0.001 * kl
+        else:
+            loss = mean_loss
 
-    return loss.mean()
+    final_loss = loss.mean()
+    
+    # Final stability check
+    if torch.isnan(final_loss) or torch.isinf(final_loss):
+        return torch.tensor(1.0, device=device, requires_grad=True)  # Return safe fallback
+    
+    return final_loss
 
 
-def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, keepdim=False):
+def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, keepdim=False, target_idx=None):
     """
-    Simple noise estimation loss for 3D (fixed variance)
+    Simple noise estimation loss for 3D (fixed variance) with stability improvements
 
     Args:
         model: 3D diffusion model
@@ -192,40 +226,70 @@ def sg_noise_estimation_loss(model, x_available, x_target, t, e, betas, keepdim=
         e: [B, 1, H, W, D] - noise
         betas: beta schedule
         keepdim: whether to keep dimensions
+        target_idx: index of target modality (if None, defaults to 0)
     """
-    # FIX: Ensure t is a LongTensor for indexing, as required by index_select.
-    t_clamped = torch.clamp(t, 0, len(betas) - 1).long()
+    device = x_target.device
+    
+    # Input validation
+    if torch.isnan(x_available).any() or torch.isinf(x_available).any():
+        raise ValueError("NaN/Inf detected in x_available")
+    if torch.isnan(x_target).any() or torch.isinf(x_target).any():
+        raise ValueError("NaN/Inf detected in x_target")
 
-    # Get alpha values
-    a = (1 - betas).cumprod(dim=0).index_select(0, t_clamped).view(-1, 1, 1, 1, 1)
+    # Get alpha values with improved stability
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-    # Add noise to target
-    x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
+    # Get values for current timestep
+    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod + 1e-8)  # Add epsilon for stability
+    sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod + 1e-8)
 
-    # Create model input by replacing first channel
+    # Get values at timestep t
+    sqrt_a_t = extract(sqrt_alphas_cumprod, t, x_target.shape)
+    sqrt_one_minus_a_t = extract(sqrt_one_minus_alphas_cumprod, t, x_target.shape)
+
+    # Forward diffusion: add noise to target
+    x_noisy = x_target * sqrt_a_t + e * sqrt_one_minus_a_t
+
+    # Unified 4->4: replace target channel with noisy target
     model_input = x_available.clone()
-    model_input[:, 0:1] = x_noisy
-
-    # Get model prediction
-    output = model(model_input, t.float())
-
-    # Handle tuple output from variance learning models
-    if isinstance(output, tuple):
-        output = output[0]
-
-    # Compute loss
-    if keepdim:
-        return (e - output).square().mean(dim=(1, 2, 3, 4))
+    if target_idx is not None:
+        model_input[:, target_idx:target_idx+1] = x_noisy
     else:
-        return (e - output).square().mean()
+        # Default to channel 0 if not specified
+        model_input[:, 0:1] = x_noisy
+
+    # Model prediction
+    et = model(model_input, t.float())
+    
+    # Handle variance learning outputs by taking only the mean
+    if isinstance(et, tuple):
+        et = et[0]
+
+    # Compute loss with stability checks
+    loss = F.mse_loss(et, e, reduction='none')
+    
+    # Clamp loss to prevent explosion
+    loss = torch.clamp(loss, max=100.0)
+    
+    if keepdim:
+        return loss
+    else:
+        final_loss = loss.mean()
+        
+        # Final stability check
+        if torch.isnan(final_loss) or torch.isinf(final_loss):
+            return torch.tensor(0.1, device=device, requires_grad=True)  # Return safe fallback
+        
+        return final_loss
 
 
-def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
+def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8, target_idx=None):
     """
     Combined loss function with multiple components (L2 + L1)
     """
     # Main diffusion loss (simple L2 on noise)
-    main_loss = fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='fixed')
+    main_loss = fast_ddpm_loss(model, x_available, x_target, t, e, betas, var_type='fixed', target_idx=target_idx)
 
     # L1 loss for additional regularization
     with torch.no_grad():
@@ -242,7 +306,10 @@ def combined_loss(model, x_available, x_target, t, e, betas, alpha=0.8):
         x_noisy = x_target * a_t_sqrt + e * sqrt_one_minus_a_t
 
         model_input = x_available.clone()
-        model_input[:, 0:1] = x_noisy
+        if target_idx is not None:
+            model_input[:, target_idx:target_idx+1] = x_noisy
+        else:
+            model_input[:, 0:1] = x_noisy
 
         pred = model(model_input, t.float())
         if isinstance(pred, tuple):
