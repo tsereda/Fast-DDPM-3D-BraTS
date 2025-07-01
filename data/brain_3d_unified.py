@@ -12,12 +12,11 @@ logger = logging.getLogger(__name__)
 
 class BraTS3DUnifiedDataset(Dataset):
     def __init__(self, data_root, phase='train', volume_size=(96, 96, 96), 
-                 min_input_modalities=1, max_input_modalities=3):
+                 min_input_modalities=3):
         self.data_root = Path(data_root)
         self.phase = phase
-        self.volume_size = tuple(volume_size)  # Ensure it's a tuple
+        self.volume_size = tuple(volume_size)
         self.min_input_modalities = min_input_modalities
-        self.max_input_modalities = max_input_modalities
         
         # BraTS modalities
         self.modalities = ['t1c', 't1n', 't2f', 't2w']
@@ -31,55 +30,34 @@ class BraTS3DUnifiedDataset(Dataset):
         logger.info(f"Found {len(self.cases)} cases for {phase} phase")
     
     def _find_cases(self):
-        """Find all valid BraTS cases with better pattern matching"""
+        """Find all valid BraTS cases"""
         cases = []
         
         if not self.data_root.exists():
-            logger.warning(f"Data root {self.data_root} does not exist")
-            return cases
+            raise FileNotFoundError(f"Data root {self.data_root} does not exist")
         
-        # Try multiple patterns to find cases
-        # Pattern 1: Direct case directories with NIfTI files
+        # Look for case directories with BraTS pattern
         for item in self.data_root.iterdir():
             if item.is_dir():
-                # Check for BraTS naming patterns
+                # Check if directory contains NIfTI files
                 nii_files = list(item.glob('*.nii*'))
-                if len(nii_files) >= 3:  # At least 3 modalities
-                    # Check if files match BraTS patterns
-                    has_modalities = any('-t1n' in f.name.lower() or 
-                                       '-t1c' in f.name.lower() or
-                                       '-t2w' in f.name.lower() or 
-                                       '-t2f' in f.name.lower() 
-                                       for f in nii_files)
+                if len(nii_files) >= self.min_input_modalities:
+                    # Verify it has BraTS modality patterns
+                    has_modalities = any(
+                        any(mod in f.name.lower() for mod in self.modalities)
+                        for f in nii_files
+                    )
                     if has_modalities:
                         cases.append(item)
-                        continue
-                
-                # Also check for generic patterns
-                modality_count = 0
-                for mod in self.modalities:
-                    if any(mod in f.name.lower() for f in nii_files):
-                        modality_count += 1
-                if modality_count >= 3:
-                    cases.append(item)
         
-        # Pattern 2: Nested structure (e.g., TrainingData/BraTS-xxx/)
-        if len(cases) == 0:
-            for subdir in self.data_root.rglob('*'):
-                if subdir.is_dir() and ('BraTS' in subdir.name or 'UPENN' in subdir.name):
-                    nii_files = list(subdir.glob('*.nii*'))
-                    if len(nii_files) >= 3:
-                        cases.append(subdir)
-        
-        # Sort cases for reproducibility
+        # Sort for reproducibility
         cases = sorted(cases, key=lambda x: x.name)
         
-        # Log some information
         if len(cases) > 0:
             logger.info(f"Sample cases: {[c.name for c in cases[:3]]}")
-            # Check modalities in first case
+            # Log files in first case for debugging
             first_case_files = list(cases[0].glob('*.nii*'))
-            logger.info(f"Files in first case: {[f.name for f in first_case_files[:5]]}")
+            logger.info(f"Files in first case: {[f.name for f in first_case_files]}")
         
         return cases
     
@@ -87,10 +65,7 @@ class BraTS3DUnifiedDataset(Dataset):
         """Load and preprocess a NIfTI volume"""
         try:
             nii = nib.load(str(filepath))
-            volume = nii.get_fdata()
-            
-            # Handle different data types
-            volume = volume.astype(np.float32)
+            volume = nii.get_fdata().astype(np.float32)
             
             # Resize to target volume size
             volume = self._resize_volume(volume, self.volume_size)
@@ -102,14 +77,13 @@ class BraTS3DUnifiedDataset(Dataset):
             
         except Exception as e:
             logger.error(f"Error loading {filepath}: {e}")
-            # Return zeros if loading fails
-            return torch.zeros(self.volume_size, dtype=torch.float32)
+            raise
     
     def _resize_volume(self, volume, target_size):
         """Resize volume to target size using interpolation"""
         if volume.shape == target_size:
             return volume
-            
+        
         try:
             from scipy.ndimage import zoom
             
@@ -118,8 +92,8 @@ class BraTS3DUnifiedDataset(Dataset):
             
             resized = zoom(volume, zoom_factors, order=1, mode='nearest')
             return resized
-        except:
-            # Fallback: simple cropping/padding
+        except ImportError:
+            logger.warning("scipy not available, using crop/pad fallback")
             return self._crop_or_pad(volume, target_size)
     
     def _crop_or_pad(self, volume, target_size):
@@ -149,8 +123,12 @@ class BraTS3DUnifiedDataset(Dataset):
     
     def _normalize_volume(self, volume):
         """Normalize volume to [-1, 1] range"""
+        # Handle zero volumes
+        if not np.any(volume > 0):
+            return np.zeros_like(volume)
+        
         # Clip outliers (1st and 99th percentile)
-        p1, p99 = np.percentile(volume[volume > 0], [1, 99]) if np.any(volume > 0) else (0, 1)
+        p1, p99 = np.percentile(volume[volume > 0], [1, 99])
         
         if p99 > p1:
             volume = np.clip(volume, p1, p99)
@@ -163,24 +141,18 @@ class BraTS3DUnifiedDataset(Dataset):
         return volume
     
     def _find_modality_file(self, case_dir, modality):
-        """Find file for a specific modality with flexible pattern matching"""
-        # Try exact BraTS pattern first
+        """Find file for a specific modality"""
+        # Try standard BraTS patterns
         patterns = [
+            f'*{modality}*.nii*',
             f'*-{modality}.nii*',
-            f'*_{modality}.nii*',
-            f'*{modality}*.nii*'
+            f'*_{modality}.nii*'
         ]
         
         for pattern in patterns:
             files = list(case_dir.glob(pattern))
             if files:
                 return files[0]
-        
-        # If not found, try case-insensitive search
-        all_files = list(case_dir.glob('*.nii*'))
-        for f in all_files:
-            if modality.lower() in f.name.lower():
-                return f
         
         return None
     
@@ -195,31 +167,36 @@ class BraTS3DUnifiedDataset(Dataset):
         available_modalities = []
         
         for modality in self.modalities:
-            # Find file with this modality
             modality_file = self._find_modality_file(case_dir, modality)
             
             if modality_file:
-                modality_data[modality] = self._load_volume(modality_file)
-                available_modalities.append(modality)
+                try:
+                    modality_data[modality] = self._load_volume(modality_file)
+                    available_modalities.append(modality)
+                except Exception as e:
+                    logger.warning(f"Failed to load {modality} from {case_dir.name}: {e}")
+                    # Use zeros for failed loads
+                    modality_data[modality] = torch.zeros(self.volume_size, dtype=torch.float32)
             else:
-                # Missing modality - use zeros
+                logger.warning(f"Missing {modality} in {case_dir.name}")
+                # Use zeros for missing modalities
                 modality_data[modality] = torch.zeros(self.volume_size, dtype=torch.float32)
         
         # Check if we have enough modalities
-        if len(available_modalities) < 2:
+        if len(available_modalities) < self.min_input_modalities:
             logger.warning(f"Case {case_dir.name} has only {len(available_modalities)} modalities")
         
-        # For unified 4→4 training:
         # Stack all modalities
         all_modalities = torch.stack([modality_data[mod] for mod in self.modalities])
         
+        # Select target modality
         if self.phase == 'train':
             # Random training: select target from available modalities
             if len(available_modalities) > 0:
                 target_modality = random.choice(available_modalities)
                 target_idx = self.modalities.index(target_modality)
             else:
-                # Fallback if no modalities available
+                # Fallback to first modality
                 target_idx = 0
                 target_modality = self.modalities[0]
         else:
@@ -234,11 +211,11 @@ class BraTS3DUnifiedDataset(Dataset):
         # Get target volume
         target_volume = all_modalities[target_idx]
         
-        # Create input with target masked
+        # Create input with target masked (set to zero)
         input_modalities = all_modalities.clone()
         input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
         
-        # Validate shapes before returning
+        # Validate shapes
         assert input_modalities.shape == (4, *self.volume_size), \
             f"Input shape mismatch: {input_modalities.shape} vs expected {(4, *self.volume_size)}"
         assert target_volume.shape == self.volume_size, \
@@ -247,34 +224,21 @@ class BraTS3DUnifiedDataset(Dataset):
         return {
             'input': input_modalities,  # [4, H, W, D]
             'target': target_volume,    # [H, W, D]
-            'target_idx': target_idx,   # CRITICAL: Now properly passed
+            'target_idx': target_idx,
             'case_name': case_dir.name,
             'target_modality': target_modality,
             'available_modalities': available_modalities
         }
 
 
-# Test function
 def test_dataset():
-    """Test the dataset with dummy data"""
+    """Test the dataset"""
     print("Testing BraTS3DUnifiedDataset...")
     
-    # This will fail with real data but shows the structure
-    try:
-        dataset = BraTS3DUnifiedDataset(
-            data_root="/dummy/path",
-            phase='train',
-            volume_size=(64, 64, 64)
-        )
-        print(f"Dataset created with {len(dataset)} cases")
-    except Exception as e:
-        print(f"Expected error (no real data): {e}")
-    
-    # Test with a real path if provided
     import sys
     if len(sys.argv) > 1:
         data_path = sys.argv[1]
-        print(f"\nTesting with real data at: {data_path}")
+        print(f"Testing with data at: {data_path}")
         try:
             dataset = BraTS3DUnifiedDataset(
                 data_root=data_path,
@@ -294,9 +258,11 @@ def test_dataset():
                 print(f"  Target modality: {sample['target_modality']}")
                 print(f"  Available modalities: {sample['available_modalities']}")
         except Exception as e:
-            print(f"❌ Error with real data: {e}")
+            print(f"❌ Error: {e}")
             import traceback
             traceback.print_exc()
+    else:
+        print("Provide data path as argument to test with real data")
 
 
 if __name__ == "__main__":

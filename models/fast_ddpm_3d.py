@@ -2,7 +2,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 
 def get_timestep_embedding(timesteps, embedding_dim):
@@ -26,18 +25,16 @@ def nonlinearity(x):
 
 
 def Normalize(in_channels, num_groups=32):
-    """
-    FIXED: Adaptive GroupNorm that finds a suitable number of groups.
-    """
+    """GroupNorm with automatic group adjustment"""
     if in_channels == 0:
         return nn.Identity()
-
-    # FIXED: Find best divisor close to desired num_groups
-    best_divisor = min(num_groups, in_channels)
-    while in_channels % best_divisor != 0 and best_divisor > 1:
-        best_divisor -= 1
     
-    return torch.nn.GroupNorm(num_groups=best_divisor, num_channels=in_channels, eps=1e-6, affine=True)
+    # Use standard approach: ensure num_groups divides in_channels
+    num_groups = min(num_groups, in_channels)
+    while in_channels % num_groups != 0:
+        num_groups -= 1
+    
+    return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
 
 
 class Upsample3D(nn.Module):
@@ -116,7 +113,7 @@ class ResnetBlock3D(nn.Module):
 
 
 class FastDDPM3D(nn.Module):
-    """3D Fast-DDPM - simplified version without attention for stability"""
+    """3D Fast-DDPM for unified 4->4 BraTS modality synthesis"""
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -129,7 +126,7 @@ class FastDDPM3D(nn.Module):
         resolution = config.data.volume_size[0]
         resamp_with_conv = config.model.resamp_with_conv
         
-        # SIMPLIFIED: Always use fixed variance - no learning
+        # Always use fixed variance for 3D
         self.out_channels = out_ch
         
         # Model parameters
@@ -147,7 +144,7 @@ class FastDDPM3D(nn.Module):
             nn.Linear(self.temb_ch, self.temb_ch),
         ])
 
-        # --- Downsampling Path ---
+        # Downsampling
         self.conv_in = nn.Conv3d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
 
         curr_res = resolution
@@ -175,7 +172,7 @@ class FastDDPM3D(nn.Module):
                 curr_res = curr_res // 2
             self.down.append(down)
 
-        # --- Middle Path ---
+        # Middle
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock3D(
             in_channels=block_in,
@@ -190,7 +187,7 @@ class FastDDPM3D(nn.Module):
             dropout=dropout
         )
 
-        # --- Upsampling Path ---
+        # Upsampling
         self.up = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
@@ -216,12 +213,12 @@ class FastDDPM3D(nn.Module):
                 curr_res = curr_res * 2
             self.up.insert(0, up)
 
-        # --- Output Path ---
+        # Output
         self.norm_out = Normalize(block_in)
         self.conv_out = nn.Conv3d(block_in, self.out_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x, t):
-        # x shape: [B, C, H, W, D]
+        # x shape: [B, 4, H, W, D] for unified 4->4 input
         assert x.shape[1] == self.in_channels
         
         # Timestep embedding
@@ -257,9 +254,4 @@ class FastDDPM3D(nn.Module):
         h = nonlinearity(h)
         h = self.conv_out(h)
         
-        # Always return single tensor (no variance learning)
         return h
-
-# Alias for backward compatibility
-Model3D = FastDDPM3D
-Model = FastDDPM3D

@@ -23,15 +23,18 @@ except ImportError:
     wandb = None
     WANDB_AVAILABLE = False
 
+# Import required modules
 try:
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import unified_4to4_loss
+    from functions.losses import unified_4to4_loss, calculate_psnr
+    from functions.denoising_3d import unified_4to4_generalized_steps
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     print("✓ Successfully imported 3D components")
 except ImportError as e:
     print(f"✗ Import error: {e}")
     print("Make sure you're running from the project root directory")
     sys.exit(1)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='3D Fast-DDPM Training for BraTS')
@@ -53,6 +56,7 @@ def parse_args():
 
     return parser.parse_args()
 
+
 def dict2namespace(config):
     """Convert dictionary to namespace object"""
     namespace = argparse.Namespace()
@@ -63,6 +67,7 @@ def dict2namespace(config):
             new_value = value
         setattr(namespace, key, new_value)
     return namespace
+
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
     """Beta schedule for diffusion - same as Fast-DDPM"""
@@ -84,23 +89,6 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     assert betas.shape == (num_diffusion_timesteps,)
     return betas
 
-def setup_logging(log_dir, args):
-    """Setup logging configuration"""
-    os.makedirs(log_dir, exist_ok=True)
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(os.path.join(log_dir, 'train.log')),
-            logging.StreamHandler()
-        ]
-    )
-    
-    # Log arguments
-    logging.info("Training arguments:")
-    for arg, value in vars(args).items():
-        logging.info(f"  {arg}: {value}")
 
 def get_timestep_schedule(scheduler_type, timesteps, num_timesteps):
     """Get timestep schedule for Fast-DDPM"""
@@ -123,6 +111,26 @@ def get_timestep_schedule(scheduler_type, timesteps, num_timesteps):
     
     return t_intervals
 
+
+def setup_logging(log_dir, args):
+    """Setup logging configuration"""
+    os.makedirs(log_dir, exist_ok=True)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(log_dir, 'train.log')),
+            logging.StreamHandler()
+        ]
+    )
+    
+    # Log arguments
+    logging.info("Training arguments:")
+    for arg, value in vars(args).items():
+        logging.info(f"  {arg}: {value}")
+
+
 def save_checkpoint(model, optimizer, scaler, step, epoch, loss, config, path):
     """Save training checkpoint"""
     checkpoint = {
@@ -137,6 +145,7 @@ def save_checkpoint(model, optimizer, scaler, step, epoch, loss, config, path):
     torch.save(checkpoint, path)
     logging.info(f'Saved checkpoint at step {step}')
 
+
 def load_checkpoint(path, model, optimizer, scaler, device):
     """Load training checkpoint"""
     checkpoint = torch.load(path, map_location=device)
@@ -147,89 +156,6 @@ def load_checkpoint(path, model, optimizer, scaler, device):
     
     return checkpoint['epoch'], checkpoint['step'], checkpoint['loss']
 
-# Simplified W&B sample logging
-@torch.no_grad()
-def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
-    """Simplified sample logging to W&B"""
-    if not WANDB_AVAILABLE:
-        return
-        
-    try:
-        model.eval()
-        
-        # Get batch data
-        inputs = batch['input'].to(device)    # [1, 4, H, W, D]
-        targets = batch['target'].to(device)  # [1, H, W, D]
-        targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
-        target_idx = batch['target_idx'][0].item()
-        
-        modality_names = ['T1c', 'T1n', 'T2f', 'T2w']
-        target_name = modality_names[target_idx]
-        
-        # Generate sample with simplified reverse process
-        shape = targets.shape
-        img = torch.randn(shape, device=device)
-        
-        # Pre-compute diffusion variables
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
-        
-        # Simplified reverse diffusion (fewer steps for speed)
-        seq = t_intervals.cpu().numpy()
-        seq_next = [-1] + list(seq[:-1])
-        
-        for i, j in zip(reversed(seq), reversed(seq_next)):
-            i_int = int(i) if isinstance(i, (int, np.integer)) else int(i.item())
-            j_int = int(j) if isinstance(j, (int, np.integer)) and j >= 0 else -1
-            
-            t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
-            
-            # Create model input
-            model_input = inputs.clone()
-            model_input[:, target_idx:target_idx+1] = img
-            
-            # Predict noise
-            et = model(model_input, t.float())
-            if isinstance(et, tuple):
-                et = et[0]
-
-            # DDIM update
-            alpha_cumprod_t = alphas_cumprod[i_int].view(1, 1, 1, 1, 1)
-            if j_int >= 0:
-                alpha_cumprod_next = alphas_cumprod[j_int].view(1, 1, 1, 1, 1)
-            else:
-                alpha_cumprod_next = torch.tensor(1.0, device=device).view(1, 1, 1, 1, 1)
-            
-            x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
-            c1 = (1 - alpha_cumprod_next).sqrt()
-            img = alpha_cumprod_next.sqrt() * x0_t + c1 * et
-
-        generated_sample = img.clamp(-1.0, 1.0)
-        
-        # Prepare visualizations (middle slice)
-        slice_idx = generated_sample.shape[-1] // 2
-        
-        def normalize_for_display(tensor_slice):
-            return (tensor_slice + 1) / 2
-        
-        # Get slices
-        generated_slice = normalize_for_display(generated_sample[0, 0, :, :, slice_idx].cpu().numpy())
-        target_slice = normalize_for_display(targets[0, 0, :, :, slice_idx].cpu().numpy())
-        
-        # Log to W&B
-        wandb.log({
-            "samples/generated": wandb.Image(generated_slice, caption=f"Generated {target_name}"),
-            "samples/target": wandb.Image(target_slice, caption=f"Ground Truth {target_name}"),
-            "samples/target_modality": target_name,
-            "samples/mse": F.mse_loss(generated_sample, targets).item(),
-            "samples/mae": F.l1_loss(generated_sample, targets).item(),
-        }, step=step)
-        
-        model.train()
-        
-    except Exception as e:
-        logging.warning(f"Sample logging failed: {e}")
-        model.train()
 
 def validate_model(model, val_loader, device, betas, t_intervals):
     """Validation loop"""
@@ -256,6 +182,67 @@ def validate_model(model, val_loader, device, betas, t_intervals):
     model.train()
     return total_loss / num_batches if num_batches > 0 else 0
 
+
+@torch.no_grad()
+def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
+    """Simplified sample logging to W&B"""
+    if not WANDB_AVAILABLE:
+        return
+        
+    try:
+        model.eval()
+        
+        # Get batch data
+        inputs = batch['input'].to(device)    # [1, 4, H, W, D]
+        targets = batch['target'].to(device)  # [1, H, W, D]
+        targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
+        target_idx = batch['target_idx'][0].item()
+        
+        # Generate sample using simplified reverse process
+        shape = targets.shape
+        img = torch.randn(shape, device=device)
+        
+        # Use the unified 4->4 sampling approach
+        model_input = inputs.clone()
+        model_input[:, target_idx:target_idx+1] = img
+        
+        # Simple reverse diffusion (just a few steps for speed)
+        seq = t_intervals[-5:].cpu().numpy()  # Use last 5 timesteps for quick sampling
+        
+        for i in reversed(seq):
+            t = torch.full((shape[0],), i, device=device, dtype=torch.long)
+            model_input[:, target_idx:target_idx+1] = img
+            
+            # Predict noise
+            et = model(model_input, t.float())
+            if isinstance(et, tuple):
+                et = et[0]
+            
+            # Simple DDIM update (eta=0)
+            alpha_cumprod_t = (1 - betas).cumprod(dim=0)[i].view(1, 1, 1, 1, 1)
+            x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
+            img = x0_t.clamp(-1.0, 1.0)
+        
+        # Log middle slice for visualization
+        slice_idx = img.shape[-1] // 2
+        generated_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        target_slice = (targets[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        
+        # Log to W&B
+        wandb.log({
+            "samples/generated": wandb.Image(generated_slice, caption=f"Generated"),
+            "samples/target": wandb.Image(target_slice, caption=f"Ground Truth"),
+            "samples/target_idx": target_idx,
+            "samples/mse": F.mse_loss(img, targets).item(),
+        }, step=step)
+        
+        model.train()
+        
+    except Exception as e:
+        logging.warning(f"Sample logging failed: {e}")
+        model.train()
+
+
 def setup_wandb(args, config):
     """Initialize W&B if requested"""
     if args.use_wandb and WANDB_AVAILABLE:
@@ -274,6 +261,17 @@ def setup_wandb(args, config):
         return True
     return False
 
+
+def load_config(config_path):
+    """Load configuration file"""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return dict2namespace(config)
+
+
 def main():
     args = parse_args()
     
@@ -286,53 +284,13 @@ def main():
     setup_logging(log_dir, args)
     
     # Load config
-    if not os.path.exists(args.config):
-        # Create a basic config if it doesn't exist
-        basic_config = {
-            'model': {
-                'ch': 64,
-                'out_ch': 1,
-                'ch_mult': [1, 2, 4],
-                'num_res_blocks': 2,
-                'dropout': 0.0,
-                'in_channels': 4,
-                'resamp_with_conv': True,
-            },
-            'data': {
-                'volume_size': [80, 80, 80],
-                'num_workers': 4,
-            },
-            'training': {
-                'batch_size': 1,
-                'learning_rate': 1e-4,
-                'epochs': 100,
-                'save_every': 1000,
-                'validate_every': 500,
-            },
-            'diffusion': {
-                'beta_schedule': 'linear',
-                'beta_start': 0.0001,
-                'beta_end': 0.02,
-                'num_diffusion_timesteps': 1000,
-            }
-        }
-        
-        config = dict2namespace(basic_config)
-        logging.warning(f"Config file not found: {args.config}, using basic config")
-    else:
-        with open(args.config, 'r') as f:
-            config = yaml.safe_load(f)
-        config = dict2namespace(config)
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {args.config}")
+        sys.exit(1)
     
     config.device = device
-    
-    # Override config with args
-    if hasattr(config, 'diffusion'):
-        config.diffusion.num_diffusion_timesteps = getattr(config.diffusion, 'timesteps', 1000)
-    
-    # Force simple variance type
-    if hasattr(config, 'model'):
-        config.model.var_type = 'fixedsmall'
     
     # Setup W&B
     use_wandb = setup_wandb(args, config)
@@ -353,11 +311,7 @@ def main():
     logging.info("Setting up datasets...")
     
     # Use provided volume size or default
-    if hasattr(config.data, 'volume_size'):
-        volume_size = tuple(config.data.volume_size)
-    else:
-        volume_size = (80, 80, 80)  # Default size
-    
+    volume_size = tuple(config.data.volume_size) if hasattr(config.data, 'volume_size') else (80, 80, 80)
     print(f"Using volume size: {volume_size}")
     
     # Check if data root exists
@@ -373,7 +327,7 @@ def main():
         
         val_dataset = BraTS3DUnifiedDataset(
             data_root=args.data_root,
-            phase='train',
+            phase='val',
             volume_size=volume_size
         )
         
@@ -452,7 +406,6 @@ def main():
     num_timesteps = betas.shape[0]
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
-
     scaler = GradScaler()
     
     # Get fixed batch for sample logging
@@ -465,14 +418,19 @@ def main():
             fixed_val_batch = None
             logging.warning("Validation loader is empty")
     
+    # Resume training if requested
     start_epoch = 0
     start_step = 0
     if args.resume and args.resume_path and os.path.exists(args.resume_path):
         logging.info(f"Resuming from checkpoint: {args.resume_path}")
-        start_epoch, start_step, _ = load_checkpoint(
-            args.resume_path, model, optimizer, scaler, device
-        )
-        logging.info(f"Resumed from epoch {start_epoch}, step {start_step}")
+        try:
+            start_epoch, start_step, _ = load_checkpoint(
+                args.resume_path, model, optimizer, scaler, device
+            )
+            logging.info(f"Resumed from epoch {start_epoch}, step {start_step}")
+        except Exception as e:
+            logging.error(f"Failed to load checkpoint: {e}")
+            raise
     
     logging.info("Starting training...")
     logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
@@ -546,6 +504,7 @@ def main():
                                  f'Target: {target_idx}, '
                                  f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
                 
+                # Save and validate periodically
                 if step % getattr(config.training, 'save_every', 1000) == 0:
                     save_checkpoint(
                         model, optimizer, scaler, step, epoch, loss.item(), 
@@ -614,6 +573,7 @@ def main():
     
     if use_wandb:
         wandb.finish()
+
 
 if __name__ == '__main__':
     try:
