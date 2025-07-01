@@ -4,12 +4,13 @@ import argparse
 import yaml
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import logging
 import numpy as np
-from collections import OrderedDict
+import time
 
 # Add the current directory to path to import modules
 sys.path.append('.')
@@ -23,17 +24,18 @@ except ImportError:
     wandb = None
     WANDB_AVAILABLE = False
 
+# Import required modules
 try:
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import sg_noise_estimation_loss, combined_loss
+    from functions.losses import unified_4to4_loss, calculate_psnr
+    from functions.denoising_3d import unified_4to4_generalized_steps
     from data.brain_3d_unified import BraTS3DUnifiedDataset
-    from utils.gpu_memory import get_recommended_volume_size, check_memory_usage
-    from utils.data_validation import validate_brats_data_structure, print_validation_results
     print("✓ Successfully imported 3D components")
 except ImportError as e:
     print(f"✗ Import error: {e}")
     print("Make sure you're running from the project root directory")
     sys.exit(1)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='3D Fast-DDPM Training for BraTS')
@@ -51,8 +53,30 @@ def parse_args():
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
     parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity (username or team)')
+    parser.add_argument('--sample_every', type=int, default=2000, help='Generate samples for W&B every N steps')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help='Gradient accumulation steps')
 
     return parser.parse_args()
+
+
+def monitor_scaler_health(scaler, step):
+    """Monitor gradient scaler health and adjust if needed"""
+    scale = scaler.get_scale()
+    
+    # Log warnings for problematic scaling
+    if scale < 1.0:
+        logging.warning(f"Low gradient scale detected: {scale:.2e} at step {step}")
+    elif scale > 65536.0:  # 2^16
+        logging.warning(f"High gradient scale detected: {scale:.2e} at step {step}")
+    
+    # Force scale adjustment if it's too extreme
+    if scale < 0.5:
+        logging.info(f"Forcing gradient scale increase from {scale:.2e}")
+        scaler.update(new_scale=2.0)
+    elif scale > 131072.0:  # 2^17
+        logging.info(f"Forcing gradient scale decrease from {scale:.2e}")
+        scaler.update(new_scale=16384.0)  # 2^14
+
 
 def dict2namespace(config):
     """Convert dictionary to namespace object"""
@@ -65,6 +89,7 @@ def dict2namespace(config):
         setattr(namespace, key, new_value)
     return namespace
 
+
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
     """Beta schedule for diffusion - same as Fast-DDPM"""
     if beta_schedule == "linear":
@@ -72,9 +97,8 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
             beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64
         )
     elif beta_schedule == "cosine":
-        # Cosine schedule as in improved DDPM
         steps = num_diffusion_timesteps + 1
-        s = 0.008  # small offset
+        s = 0.008
         x = np.linspace(0, num_diffusion_timesteps, steps)
         alphas_cumprod = np.cos(((x / num_diffusion_timesteps) + s) / (1 + s) * np.pi * 0.5) ** 2
         alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
@@ -85,6 +109,29 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     
     assert betas.shape == (num_diffusion_timesteps,)
     return betas
+
+
+def get_timestep_schedule(scheduler_type, timesteps, num_timesteps):
+    """Get timestep schedule for Fast-DDPM"""
+    if scheduler_type == 'uniform':
+        skip = num_timesteps // timesteps
+        t_intervals = torch.arange(0, num_timesteps, skip)
+    elif scheduler_type == 'non-uniform':
+        if timesteps == 10:
+            t_intervals = torch.tensor([0, 199, 399, 599, 699, 799, 849, 899, 949, 999])
+        else:
+            num_1 = int(timesteps * 0.4)
+            num_2 = int(timesteps * 0.6)
+            stage_1 = torch.linspace(0, 699, num_1 + 1)[:-1]
+            stage_2 = torch.linspace(699, 999, num_2)
+            stage_1 = torch.ceil(stage_1).long()
+            stage_2 = torch.ceil(stage_2).long()
+            t_intervals = torch.cat((stage_1, stage_2))
+    else:
+        raise ValueError(f"Unknown scheduler type: {scheduler_type}")
+    
+    return t_intervals
+
 
 def setup_logging(log_dir, args):
     """Setup logging configuration"""
@@ -104,28 +151,6 @@ def setup_logging(log_dir, args):
     for arg, value in vars(args).items():
         logging.info(f"  {arg}: {value}")
 
-def get_timestep_schedule(scheduler_type, timesteps, num_timesteps):
-    """Get timestep schedule for Fast-DDPM"""
-    if scheduler_type == 'uniform':
-        skip = num_timesteps // timesteps
-        t_intervals = torch.arange(0, num_timesteps, skip)
-    elif scheduler_type == 'non-uniform':
-        # Non-uniform schedule from Fast-DDPM paper (optimized for 10 steps)
-        if timesteps == 10:
-            t_intervals = torch.tensor([0, 199, 399, 599, 699, 799, 849, 899, 949, 999])
-        else:
-            # Adaptive non-uniform schedule
-            num_1 = int(timesteps * 0.4)
-            num_2 = int(timesteps * 0.6)
-            stage_1 = torch.linspace(0, 699, num_1 + 1)[:-1]
-            stage_2 = torch.linspace(699, 999, num_2)
-            stage_1 = torch.ceil(stage_1).long()
-            stage_2 = torch.ceil(stage_2).long()
-            t_intervals = torch.cat((stage_1, stage_2))
-    else:
-        raise ValueError(f"Unknown scheduler type: {scheduler_type}")
-    
-    return t_intervals
 
 def save_checkpoint(model, optimizer, scaler, step, epoch, loss, config, path):
     """Save training checkpoint"""
@@ -141,6 +166,7 @@ def save_checkpoint(model, optimizer, scaler, step, epoch, loss, config, path):
     torch.save(checkpoint, path)
     logging.info(f'Saved checkpoint at step {step}')
 
+
 def load_checkpoint(path, model, optimizer, scaler, device):
     """Load training checkpoint"""
     checkpoint = torch.load(path, map_location=device)
@@ -151,133 +177,8 @@ def load_checkpoint(path, model, optimizer, scaler, device):
     
     return checkpoint['epoch'], checkpoint['step'], checkpoint['loss']
 
-# --- START: New functions for W&B sample logging ---
 
-def get_diffusion_variables(betas):
-    """Pre-compute diffusion variables for sampling."""
-    device = betas.device
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, axis=0)
-    
-    return {
-        'alphas': alphas.to(device),
-        'alphas_cumprod': alphas_cumprod.to(device),
-    }
-
-@torch.no_grad()
-def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device, step):
-    """
-    Generates an image sample from the model using DDIM and logs 2D slices to W&B
-    for an image-to-image translation task.
-    """
-    logging.info(f"Starting W&B sample logging at step {step}")
-    model.eval()
-
-    # Use the provided fixed batch
-    inputs = batch['input'].to(device)    # [1, 4, H, W, D]
-    targets = batch['target'].to(device)  # [1, H, W, D]
-    targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
-    
-    logging.info(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
-
-    # Generate a sample using the reverse diffusion process (DDIM)
-    shape = targets.shape
-    img = torch.randn(shape, device=device) # Start with pure noise
-
-    # Create the reverse timestep sequence from the training schedule
-    seq = t_intervals.cpu().numpy()
-    seq_next = [-1] + list(seq[:-1])
-    
-    logging.info(f"Diffusion sequence length: {len(seq)}")
-
-    # Reverse process
-    for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
-        # Convert numpy scalars to Python ints for tensor indexing
-        i_int = int(i) if isinstance(i, (int, np.integer)) else int(i.item())
-        j_int = int(j) if isinstance(j, (int, np.integer)) and j >= 0 else -1
-        
-        t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
-        
-        # Create model input by replacing first channel with noisy image
-        model_input = inputs.clone()
-        model_input[:, 0:1] = img
-        
-        # Predict noise using the model
-        et = model(model_input, t.float())
-        
-        # Handle tuple output for variance learning models
-        if isinstance(et, tuple):
-            et = et[0]  # Use mean prediction only
-
-        # DDIM update rule - get alpha values directly as tensors
-        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].to(device)
-        if j_int >= 0:
-            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int].to(device)
-        else:
-            alpha_cumprod_next = torch.tensor(1.0, device=device)
-        
-        # Ensure proper broadcasting shape for 5D tensors
-        alpha_cumprod_t = alpha_cumprod_t.view(1, 1, 1, 1, 1)
-        alpha_cumprod_next = alpha_cumprod_next.view(1, 1, 1, 1, 1)
-        
-        # Predicted x0
-        x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
-        
-        # Direction pointing to x_t
-        c1 = (1 - alpha_cumprod_next).sqrt()
-        
-        # Update
-        img = alpha_cumprod_next.sqrt() * x0_t + c1 * et
-    
-    # Clamp the final sample to a valid image range
-    generated_sample = img.clamp(0.0, 1.0)
-    logging.info(f"Generated sample shape: {generated_sample.shape}, range: [{generated_sample.min():.3f}, {generated_sample.max():.3f}]")
-
-    # --- Prepare slices for logging ---
-    # We'll take the middle slice from the depth axis
-    slice_idx = generated_sample.shape[-1] // 2
-
-    # Get slices (convert to numpy for visualization)
-    # Using FLAIR as the example input modality for context
-    input_flair_slice = inputs[0, 3, :, :, slice_idx].cpu().numpy()
-
-    # Ground truth and generated image sample (no longer treated as masks)
-    target_image_slice = targets[0, 0, :, :, slice_idx].cpu().numpy()
-    generated_image_slice = generated_sample[0, 0, :, :, slice_idx].cpu().numpy()
-
-    # Normalize slices to 0-1 range for better visualization
-    def normalize_slice(slice_array):
-        slice_min, slice_max = slice_array.min(), slice_array.max()
-        if slice_max > slice_min:
-            return (slice_array - slice_min) / (slice_max - slice_min)
-        return slice_array
-
-    input_flair_slice = normalize_slice(input_flair_slice)
-    target_image_slice = normalize_slice(target_image_slice)
-    generated_image_slice = normalize_slice(generated_image_slice)
-
-    # Log to W&B as a gallery of images for side-by-side comparison
-    if not WANDB_AVAILABLE:
-        logging.error("W&B is not available, cannot log images")
-        return
-    
-    log_dict = {
-        "samples/image_comparison": [
-            wandb.Image(input_flair_slice, caption=f"Input: FLAIR (Step {step})"),
-            wandb.Image(generated_image_slice, caption=f"Model Output (Step {step})"),
-            wandb.Image(target_image_slice, caption=f"Ground Truth (Step {step})")
-        ]
-    }
-
-    wandb.log(log_dict, step=step)
-    logging.info(f"Successfully logged sample image slices to W&B at step {step}")
-    logging.info(f"Slice shapes - Input: {input_flair_slice.shape}, Generated: {generated_image_slice.shape}, Target: {target_image_slice.shape}")
-    
-    model.train() # Set model back to training mode
-
-# --- END: New functions for W&B sample logging ---
-
-def validate_model(model, val_loader, device, betas, timesteps):
+def validate_model(model, val_loader, device, betas, t_intervals):
     """Validation loop"""
     model.eval()
     total_loss = 0
@@ -287,48 +188,110 @@ def validate_model(model, val_loader, device, betas, timesteps):
         for batch in tqdm(val_loader, desc="Validating", leave=False):
             inputs = batch['input'].to(device)
             targets = batch['target'].to(device).unsqueeze(1)
+            target_idx = batch['target_idx'][0].item()
             
             n = inputs.size(0)
-            # Use full timestep range for validation loss for consistency
-            t = torch.randint(0, len(betas), (n,), device=device)
+            # Use Fast-DDPM timestep schedule for validation too
+            idx = torch.randint(0, len(t_intervals), (n,))
+            t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
             
-            loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas)
+            loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
     model.train()
     return total_loss / num_batches if num_batches > 0 else 0
 
+
+@torch.no_grad()
+def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
+    """Simplified sample logging to W&B"""
+    if not WANDB_AVAILABLE:
+        return
+        
+    try:
+        model.eval()
+        
+        # Get batch data
+        inputs = batch['input'].to(device)    # [1, 4, H, W, D]
+        targets = batch['target'].to(device)  # [1, H, W, D]
+        targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
+        target_idx = batch['target_idx'][0].item()
+        
+        # Generate sample using simplified reverse process
+        shape = targets.shape
+        img = torch.randn(shape, device=device)
+        
+        # Use the unified 4->4 sampling approach
+        model_input = inputs.clone()
+        model_input[:, target_idx:target_idx+1] = img
+        
+        # Simple reverse diffusion (just a few steps for speed)
+        seq = t_intervals[-5:].cpu().numpy()  # Use last 5 timesteps for quick sampling
+        
+        for i in reversed(seq):
+            t = torch.full((shape[0],), i, device=device, dtype=torch.long)
+            model_input[:, target_idx:target_idx+1] = img
+            
+            # Predict noise
+            et = model(model_input, t.float())
+            if isinstance(et, tuple):
+                et = et[0]
+            
+            # Simple DDIM update (eta=0)
+            alpha_cumprod_t = (1 - betas).cumprod(dim=0)[i].view(1, 1, 1, 1, 1)
+            x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
+            img = x0_t.clamp(-1.0, 1.0)
+        
+        # Log middle slice for visualization
+        slice_idx = img.shape[-1] // 2
+        generated_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        target_slice = (targets[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
+        
+        # Log to W&B
+        wandb.log({
+            "samples/generated": wandb.Image(generated_slice, caption=f"Generated"),
+            "samples/target": wandb.Image(target_slice, caption=f"Ground Truth"),
+            "samples/target_idx": target_idx,
+            "samples/mse": F.mse_loss(img, targets).item(),
+        }, step=step)
+        
+        model.train()
+        
+    except Exception as e:
+        logging.warning(f"Sample logging failed: {e}")
+        model.train()
+
+
 def setup_wandb(args, config):
     """Initialize W&B if requested"""
     if args.use_wandb and WANDB_AVAILABLE:
-        # Check if we should use W&B from config too
-        use_wandb = args.use_wandb
-        if hasattr(config, 'logging') and hasattr(config.logging, 'use_wandb'):
-            use_wandb = use_wandb or config.logging.use_wandb
-        
-        if use_wandb:
-            # Get project name from config if available
-            project_name = args.wandb_project
-            if hasattr(config, 'logging') and hasattr(config.logging, 'project_name'):
-                project_name = config.logging.project_name
-            
-            # Initialize W&B
-            wandb.init(
-                project=project_name,
-                entity=args.wandb_entity,
-                name=args.doc,
-                config={
-                    **vars(args),
-                    'model_config': config.model.__dict__ if hasattr(config, 'model') else {},
-                    'data_config': config.data.__dict__ if hasattr(config, 'data') else {},
-                    'training_config': config.training.__dict__ if hasattr(config, 'training') else {},
-                    'diffusion_config': config.diffusion.__dict__ if hasattr(config, 'diffusion') else {},
-                }
-            )
-            return True
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.doc,
+            config={
+                **vars(args),
+                'model_config': config.model.__dict__ if hasattr(config, 'model') else {},
+                'data_config': config.data.__dict__ if hasattr(config, 'data') else {},
+                'training_config': config.training.__dict__ if hasattr(config, 'training') else {},
+                'diffusion_config': config.diffusion.__dict__ if hasattr(config, 'diffusion') else {},
+            }
+        )
+        return True
     return False
+
+
+def load_config(config_path):
+    """Load configuration file"""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return dict2namespace(config)
+
 
 def main():
     args = parse_args()
@@ -342,28 +305,35 @@ def main():
     setup_logging(log_dir, args)
     
     # Load config
-    if not os.path.exists(args.config):
-        raise FileNotFoundError(f"Config file not found: {args.config}")
-        
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-    config = dict2namespace(config)
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {args.config}")
+        sys.exit(1)
+    
     config.device = device
     
-    # Override config with args
-    if hasattr(config, 'diffusion'):
-        config.diffusion.num_diffusion_timesteps = getattr(config.diffusion, 'timesteps', 1000)
+    # Debug: Log config training values
+    logging.info(f"Config training section: {vars(config.training) if hasattr(config, 'training') else 'No training section'}")
+    if hasattr(config, 'training'):
+        logging.info(f"save_every in config: {getattr(config.training, 'save_every', 'NOT FOUND')}")
+        logging.info(f"validate_every in config: {getattr(config.training, 'validate_every', 'NOT FOUND')}")
     
-    # Override W&B settings from command line if provided
-    if args.use_wandb:
-        if not hasattr(config, 'logging'):
-            config.logging = argparse.Namespace()
-        config.logging.use_wandb = True
+    # Gradient accumulation settings
+    gradient_accumulation_steps = args.gradient_accumulation_steps
+    effective_batch_size = config.training.batch_size * gradient_accumulation_steps
+    
+    logging.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logging.info(f"Effective batch size: {effective_batch_size}")
     
     # Setup W&B
     use_wandb = setup_wandb(args, config)
     if use_wandb:
         logging.info("✅ W&B initialized successfully")
+        wandb.config.update({
+            'gradient_accumulation_steps': gradient_accumulation_steps,
+            'effective_batch_size': effective_batch_size
+        })
     elif args.use_wandb and not WANDB_AVAILABLE:
         logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
     
@@ -378,26 +348,9 @@ def main():
     # Dataset and DataLoader
     logging.info("Setting up datasets...")
     
-    # Validate data structure first
-    validation_results = validate_brats_data_structure(args.data_root)
-    print_validation_results(validation_results)
-    
-    if not validation_results['valid']:
-        raise ValueError("Invalid data structure. Please check your BraTS data directory.")
-    
-    # Auto-adjust volume size based on GPU memory
-    recommended_size = get_recommended_volume_size()
-    if hasattr(config.data, 'volume_size'):
-        original_size = tuple(config.data.volume_size)
-        print(f"Config volume size: {original_size}")
-        print(f"Recommended volume size: {recommended_size}")
-        
-        # Use the smaller of the two (more conservative)
-        final_size = tuple(min(o, r) for o, r in zip(original_size, recommended_size))
-        config.data.volume_size = final_size
-        print(f"Using volume size: {final_size}")
-    else:
-        config.data.volume_size = recommended_size
+    # Use provided volume size or default
+    volume_size = tuple(config.data.volume_size) if hasattr(config.data, 'volume_size') else (80, 80, 80)
+    print(f"Using volume size: {volume_size}")
     
     # Check if data root exists
     if not os.path.exists(args.data_root):
@@ -407,22 +360,25 @@ def main():
         train_dataset = BraTS3DUnifiedDataset(
             data_root=args.data_root,
             phase='train',
-            volume_size=tuple(config.data.volume_size)
+            volume_size=volume_size
         )
         
         val_dataset = BraTS3DUnifiedDataset(
             data_root=args.data_root,
-            phase='train',  # Use same for now, can change to 'val' if available
-            volume_size=tuple(config.data.volume_size)
+            phase='val',
+            volume_size=volume_size
         )
         
         if args.debug:
             from torch.utils.data import Subset
-            train_indices = list(range(min(10, len(train_dataset))))
-            val_indices = list(range(min(5, len(val_dataset))))
+            # Use larger debug dataset: ~10% of total for meaningful epochs
+            debug_train_size = min(125, len(train_dataset))  # ~125 cases = ~125 batches per epoch
+            debug_val_size = min(25, len(val_dataset))       # ~25 cases for validation
+            train_indices = list(range(debug_train_size))
+            val_indices = list(range(debug_val_size))
             train_dataset = Subset(train_dataset, train_indices)
             val_dataset = Subset(val_dataset, val_indices)
-            logging.info("Debug mode: using smaller datasets")
+            logging.info(f"Debug mode: using {debug_train_size} train samples, {debug_val_size} val samples")
         
     except Exception as e:
         logging.error(f"Failed to create datasets: {e}")
@@ -439,23 +395,11 @@ def main():
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,  # Smaller batch for validation
+        batch_size=1,
         shuffle=False,
         num_workers=2,
         pin_memory=True
     )
-    
-    # --- START: Modified section for W&B sample logging ---
-    # Get a fixed batch from the validation set for consistent logging
-    fixed_val_batch = None
-    if use_wandb and len(val_loader) > 0:
-        try:
-            fixed_val_batch = next(iter(val_loader))
-            logging.info("Grabbed a fixed validation batch for W&B logging.")
-        except StopIteration:
-            fixed_val_batch = None
-            logging.warning("Validation loader is empty, cannot log sample slices.")
-    # --- END: Modified section ---
 
     logging.info(f"Train samples: {len(train_dataset)}")
     logging.info(f"Val samples: {len(val_dataset)}")
@@ -489,7 +433,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, 
         T_max=config.training.epochs,
-        eta_min=config.training.learning_rate * 0.01
+        eta_min=config.training.learning_rate * 0.1
     )
     
     # Diffusion setup
@@ -504,75 +448,80 @@ def main():
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
     
-    # --- START: Added diffusion vars for W&B logging ---
-    diffusion_vars = get_diffusion_variables(betas) if use_wandb else None
-    if diffusion_vars:
-        # Ensure all diffusion variables are on the correct device
-        for key in diffusion_vars:
-            diffusion_vars[key] = diffusion_vars[key].to(device)
-    # --- END: Added diffusion vars ---
-
-    scaler = GradScaler()
+    # Initialize gradient scaler with config settings
+    init_scale = getattr(config.training, 'loss_scale_init', 2048.0)
+    growth_interval = getattr(config.training, 'loss_scale_growth', 2000)
+    backoff_factor = getattr(config.training, 'loss_scale_backoff', 0.5)
     
+    scaler = GradScaler(
+        init_scale=init_scale,
+        growth_factor=2.0,
+        backoff_factor=backoff_factor,
+        growth_interval=growth_interval
+    )
+    
+    logging.info(f"Initialized GradScaler with init_scale={init_scale}, "
+                 f"growth_interval={growth_interval}, backoff_factor={backoff_factor}")
+    
+    # Get fixed batch for sample logging
+    fixed_val_batch = None
+    if use_wandb and len(val_loader) > 0:
+        try:
+            fixed_val_batch = next(iter(val_loader))
+            logging.info("Got fixed validation batch for sample logging")
+        except StopIteration:
+            fixed_val_batch = None
+            logging.warning("Validation loader is empty")
+    
+    # Resume training if requested
     start_epoch = 0
     start_step = 0
     if args.resume and args.resume_path and os.path.exists(args.resume_path):
         logging.info(f"Resuming from checkpoint: {args.resume_path}")
-        start_epoch, start_step, _ = load_checkpoint(
-            args.resume_path, model, optimizer, scaler, device
-        )
-        logging.info(f"Resumed from epoch {start_epoch}, step {start_step}")
-    
-    logging.info("Starting 3D Fast-DDPM training...")
-    logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
-    logging.info(f"Volume size: {config.data.volume_size}")
-    logging.info(f"Batch size: {config.training.batch_size}")
-    
-    # Debug loss function selection
-    if hasattr(config.diffusion, 'loss_type'):
-        logging.info(f"Using loss type: {config.diffusion.loss_type}")
-        if config.diffusion.loss_type == 'hybrid':
-            var_type = getattr(config.model, 'var_type', 'fixed')
-            logging.info(f"Using fast_ddpm_loss with var_type: {var_type}")
-        else:
-            logging.info("Using sg_noise_estimation_loss")
-    else:
-        logging.info("Using sg_noise_estimation_loss (default)")
-    
-    step = start_step
-    best_val_loss = float('inf')
-    
-    # Log initial sample to W&B if enabled
-    if use_wandb and fixed_val_batch and diffusion_vars:
-        logging.info("Logging initial sample to W&B...")
         try:
-            log_sample_slices_to_wandb(
-                model.module if isinstance(model, nn.DataParallel) else model,
-                fixed_val_batch,
-                t_intervals,
-                diffusion_vars,
-                device,
-                step=0
+            start_epoch, start_step, _ = load_checkpoint(
+                args.resume_path, model, optimizer, scaler, device
             )
-            logging.info("Successfully logged initial sample to W&B")
+            logging.info(f"Resumed from epoch {start_epoch}, step {start_step}")
         except Exception as e:
-            logging.error(f"Failed to log initial sample to W&B: {e}")
+            logging.error(f"Failed to load checkpoint: {e}")
+            raise
+    
+    logging.info("Starting training...")
+    logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
+    logging.info(f"Volume size: {volume_size}")
+    logging.info(f"Batch size: {config.training.batch_size}")
+    logging.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logging.info(f"Effective batch size: {effective_batch_size}")
+    
+    global_step = start_step  # This tracks actual optimizer steps
+    best_val_loss = float('inf')
     
     for epoch in range(start_epoch, config.training.epochs):
         model.train()
         epoch_loss = 0.0
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{config.training.epochs}')
+        
+        # Initialize accumulation variables
+        accumulated_loss = 0.0
+        accumulation_steps = 0
+        
         for batch_idx, batch in enumerate(pbar):
             try:
-                optimizer.zero_grad()
+                step_start_time = time.time()
+                
+                # Zero gradients at the start of each accumulation cycle
+                if accumulation_steps == 0:
+                    optimizer.zero_grad()
                 
                 inputs = batch['input'].to(device)
                 targets = batch['target'].to(device).unsqueeze(1)
+                target_idx = batch['target_idx'][0].item()
                 
                 n = inputs.size(0)
-                step += 1
                 
+                # Fast-DDPM antithetic sampling
                 idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
                 idx_2 = len(t_intervals) - idx_1 - 1
                 idx = torch.cat([idx_1, idx_2], dim=0)[:n]
@@ -581,102 +530,163 @@ def main():
                 e = torch.randn_like(targets)
                 
                 with autocast():
-                    # Use appropriate loss function based on config
-                    if hasattr(config.diffusion, 'loss_type') and config.diffusion.loss_type == 'hybrid':
-                        var_type = getattr(config.model, 'var_type', 'fixed')
-                        from functions.losses import fast_ddpm_loss
-                        loss = fast_ddpm_loss(model, inputs, targets, t, e, betas, var_type=var_type)
-                    else:
-                        loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas)
+                    loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                    # Don't scale loss here - let gradient accumulation handle it naturally
                 
-                scaler.scale(loss).backward()
+                # Check for NaN/Inf loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    logging.error(f"Invalid loss detected: {loss.item()}")
+                    logging.error(f"Input stats: min={inputs.min():.3f}, max={inputs.max():.3f}")
+                    logging.error(f"Target stats: min={targets.min():.3f}, max={targets.max():.3f}")
+                    if args.debug:
+                        raise ValueError("NaN/Inf loss - stopping training")
+                    continue  # Skip this batch
                 
-                if hasattr(config.training, 'gradient_clip'):
+                # Additional safety check for extreme loss values
+                loss_value = loss.item()
+                if loss_value > 1000.0:
+                    logging.warning(f"Very large loss detected: {loss_value:.6f} - possible scaling issue")
+                elif loss_value < 1e-8:
+                    logging.warning(f"Very small loss detected: {loss_value:.6e} - possible underflow")
+                
+                # Scale loss for gradient accumulation BEFORE backward pass
+                scaled_loss = loss / gradient_accumulation_steps
+                scaler.scale(scaled_loss).backward()
+                accumulated_loss += loss.item()  # Accumulate the original (unscaled) loss for logging
+                accumulation_steps += 1
+                
+                # Step optimizer when we've accumulated enough gradients
+                if accumulation_steps >= gradient_accumulation_steps:
                     scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip)
-                else:
-                    grad_norm = 0.0
-                
-                scaler.step(optimizer)
-                scaler.update()
-                
-                epoch_loss += loss.item()
-                
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.6f}',
-                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
-                })
-                
-                if use_wandb and step % 10 == 0:
-                    log_dict = {
-                        'train/loss': loss.item(),
-                        'train/learning_rate': optimizer.param_groups[0]["lr"],
-                        'train/epoch': epoch,
-                        'train/step': step,
-                    }
-                    if grad_norm > 0:
-                        log_dict['train/grad_norm'] = grad_norm
-                    if torch.cuda.is_available():
-                        log_dict['system/gpu_memory_allocated'] = torch.cuda.memory_allocated() / 1e9
-                        log_dict['system/gpu_memory_reserved'] = torch.cuda.memory_reserved() / 1e9
-                    wandb.log(log_dict, step=step)
-                
-                if (batch_idx + 1) % args.log_every_n_steps == 0:
-                    logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
-                                 f'Batch {batch_idx+1}/{len(train_loader)} - '
-                                 f'Step Loss: {loss.item():.6f}, '
-                                 f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
-                
-                if step % getattr(config.training, 'save_every', 1000) == 0:
-                    save_checkpoint(
-                        model, optimizer, scaler, step, epoch, loss.item(), 
-                        config, os.path.join(log_dir, f'ckpt_{step}.pth')
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), 
+                        max_norm=getattr(config.training, 'gradient_clip', float('inf'))
                     )
-                
-                if step % getattr(config.training, 'validate_every', 100) == 0:
-                    val_loss = validate_model(model, val_loader, device, betas, args.timesteps)
-                    logging.info(f'Step {step} - Val Loss: {val_loss:.6f}')
                     
+                    scaler.step(optimizer)
+                    scaler.update()
+                    
+                    # Monitor gradient scaler health
+                    if global_step % 100 == 0:  # Check every 100 steps
+                        monitor_scaler_health(scaler, global_step)
+                    
+                    # Move scheduler step here to avoid the warning
+                    # scheduler.step()  # Comment out - we'll do this at end of epoch instead
+                    
+                    # Now we've completed one effective training step
+                    global_step += 1
+                    
+                    # Calculate average loss over accumulation steps
+                    average_loss = accumulated_loss / gradient_accumulation_steps
+                    epoch_loss += average_loss
+                    
+                    step_time = time.time() - step_start_time
+                    
+                    pbar.set_postfix({
+                        'loss': f'{average_loss:.6f}',
+                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                        'target': f'{target_idx}',
+                        'step': global_step,
+                        'step_time': f'{step_time:.2f}s'
+                    })
+                    
+                    # W&B logging
                     if use_wandb:
                         wandb.log({
-                            'val/loss': val_loss,
-                            'val/epoch': epoch,
-                        }, step=step)
-                        
-                        # --- START: Call to the W&B sample logging function ---
-                        if fixed_val_batch and diffusion_vars:
-                            log_sample_slices_to_wandb(
-                                # unwrap model from DataParallel if used
-                                model.module if isinstance(model, nn.DataParallel) else model,
-                                fixed_val_batch,
-                                t_intervals,
-                                diffusion_vars,
-                                device,
-                                step
-                            )
-                        # --- END: Call to the W&B sample logging function ---
+                            'train/loss': average_loss,
+                            'train/learning_rate': optimizer.param_groups[0]["lr"],
+                            'train/epoch': epoch,
+                            'train/step': global_step,
+                            'train/target_idx': target_idx,
+                            'train/grad_norm': grad_norm.item() if grad_norm > 0 else 0,
+                            'train/loss_scale': scaler.get_scale(),
+                            'system/gpu_memory_mb': torch.cuda.max_memory_allocated() / 1024 / 1024,
+                            'system/step_time': step_time,
+                        }, step=global_step)
                     
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
+                    # Reset accumulation variables for next cycle
+                    accumulated_loss = 0.0
+                    accumulation_steps = 0
+                    
+                    # Logging
+                    if global_step % args.log_every_n_steps == 0:
+                        logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
+                                     f'Step {global_step} - '
+                                     f'Loss: {average_loss:.6f}, '
+                                     f'Target: {target_idx}, '
+                                     f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
+                                     f'Time: {step_time:.2f}s')
+                    
+                    # Save and validate periodically
+                    save_every = getattr(config.training, 'save_every', 2000)
+                    validate_every = getattr(config.training, 'validate_every', 1000)
+                    
+                    if global_step % save_every == 0:
                         save_checkpoint(
-                            model, optimizer, scaler, step, epoch, val_loss,
-                            config, os.path.join(log_dir, 'best_model.pth')
+                            model, optimizer, scaler, global_step, epoch, average_loss, 
+                            config, os.path.join(log_dir, f'ckpt_{global_step}.pth')
                         )
-                        logging.info(f'New best validation loss: {val_loss:.6f}')
+                        logging.info(f'Saved checkpoint at step {global_step} (save_every={save_every})')
+                    
+                    if global_step % validate_every == 0:
+                        val_loss = validate_model(model, val_loader, device, betas, t_intervals)
+                        logging.info(f'Step {global_step} - Val Loss: {val_loss:.6f}')
                         
                         if use_wandb:
-                            wandb.run.summary["best_val_loss"] = val_loss
-                            wandb.run.summary["best_val_step"] = step
+                            wandb.log({
+                                'val/loss': val_loss,
+                                'val/epoch': epoch,
+                            }, step=global_step)
+                        
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            save_checkpoint(
+                                model, optimizer, scaler, global_step, epoch, val_loss,
+                                config, os.path.join(log_dir, 'best_model.pth')
+                            )
+                            logging.info(f'New best validation loss: {val_loss:.6f}')
+                            
+                            if use_wandb:
+                                wandb.run.summary["best_val_loss"] = val_loss
+                                wandb.run.summary["best_val_step"] = global_step
+                    
+                    # Sample logging
+                    if use_wandb and fixed_val_batch and global_step % args.sample_every == 0:
+                        log_samples_to_wandb(
+                            model.module if isinstance(model, nn.DataParallel) else model,
+                            fixed_val_batch,
+                            t_intervals,
+                            betas,
+                            device,
+                            global_step
+                        )
+                
+                # Clear GPU memory cache periodically
+                if (batch_idx + 1) % 10 == 0:
+                    torch.cuda.empty_cache()
             
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    logging.error("GPU OOM - clearing cache and skipping batch")
+                    torch.cuda.empty_cache()
+                    # Reset accumulation if OOM occurred
+                    accumulated_loss = 0.0
+                    accumulation_steps = 0
+                    continue
+                else:
+                    logging.error(f"Runtime error in training step: {e}")
+                    if args.debug:
+                        raise
+                    continue
             except Exception as e:
-                logging.error(f"Error in training step {step}: {e}")
+                logging.error(f"Error in training step: {e}")
                 if args.debug:
                     raise
                 continue
         
         # End of epoch
         scheduler.step()
-        avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else 0
+        avg_loss = epoch_loss / max(1, global_step - start_step) if global_step > start_step else 0
         logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
         
         if use_wandb:
@@ -684,12 +694,15 @@ def main():
                 'epoch/avg_loss': avg_loss,
                 'epoch/learning_rate': optimizer.param_groups[0]["lr"],
                 'epoch/epoch': epoch + 1,
-            }, step=step)
+            }, step=global_step)
         
-        save_checkpoint(
-            model, optimizer, scaler, step, epoch, avg_loss,
-            config, os.path.join(log_dir, 'ckpt.pth')
-        )
+        # Only save checkpoint at end of epoch if it's a multiple of 10 epochs (much less frequent)
+        if (epoch + 1) % 10 == 0:
+            save_checkpoint(
+                model, optimizer, scaler, global_step, epoch, avg_loss,
+                config, os.path.join(log_dir, f'ckpt_epoch_{epoch+1}.pth')
+            )
+            logging.info(f'Saved epoch checkpoint at epoch {epoch+1}')
     
     logging.info("Training completed!")
     logging.info(f"Best validation loss: {best_val_loss:.6f}")
@@ -697,6 +710,7 @@ def main():
     
     if use_wandb:
         wandb.finish()
+
 
 if __name__ == '__main__':
     try:

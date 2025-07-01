@@ -46,10 +46,8 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          git clone https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          git clone -b dev3 https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
-          
-          mkdir -p /app/nnunet/{raw,preprocessed,results}
           
           sudo apt-get update && sudo apt-get install -y p7zip-full wget git
           
@@ -64,7 +62,7 @@ spec:
             fi
           done
           
-          pip install pyyaml torch tqdm numpy nibabel wandb matplotlib
+          pip install pyyaml torch tqdm numpy nibabel wandb matplotlib medpy
           
           echo "Checking W&B configuration..."
           python -c "import wandb; print(f'W&B version: {wandb.__version__}')"

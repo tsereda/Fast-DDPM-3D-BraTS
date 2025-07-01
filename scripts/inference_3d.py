@@ -109,9 +109,10 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
     
     def normalize_volume(volume):
         v_min = np.amin(volume)
-        v_max = np.amax(volume) - v_min
-        if v_max > 0:
-            volume = (volume - v_min) / v_max
+        v_max = np.amax(volume) 
+        if v_max > v_min:
+            # Normalize to [-1, 1] range to match training data
+            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
         return volume
     
     # Find available files
@@ -275,7 +276,7 @@ def main():
                 generated = xs[-1].squeeze(0).squeeze(0)  # [H, W, D]
                 
                 # Clamp to valid range
-                generated = torch.clamp(generated, 0, 1)
+                generated = torch.clamp(generated, -1, 1)
                 
                 print(f"Generated shape: {generated.shape}")
                 print(f"Generated range: [{generated.min():.3f}, {generated.max():.3f}]")

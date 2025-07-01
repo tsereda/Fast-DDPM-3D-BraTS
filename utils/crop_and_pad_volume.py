@@ -76,7 +76,9 @@ def normalise_image(image, norm_type='div_by_max'):
         perc1 = percentile(image, 1)
         perc99 = percentile(image, 99)
         normalized_img = torch.divide((image - perc1), (perc99 - perc1))
-        normalized_img[normalized_img < 0] = 0.0
+        # Rescale from [0,1] to [-1,1] to match diffusion model expectations
+        normalized_img = 2 * normalized_img - 1
+        normalized_img[normalized_img < -1] = -1.0
         normalized_img[normalized_img > 1] = 1.0
 
     return normalized_img
