@@ -294,6 +294,12 @@ def main():
     
     config.device = device
     
+    # Debug: Log config training values
+    logging.info(f"Config training section: {vars(config.training) if hasattr(config, 'training') else 'No training section'}")
+    if hasattr(config, 'training'):
+        logging.info(f"save_every in config: {getattr(config.training, 'save_every', 'NOT FOUND')}")
+        logging.info(f"validate_every in config: {getattr(config.training, 'validate_every', 'NOT FOUND')}")
+    
     # Gradient accumulation settings
     gradient_accumulation_steps = args.gradient_accumulation_steps
     effective_batch_size = config.training.batch_size * gradient_accumulation_steps
@@ -516,6 +522,9 @@ def main():
                     scaler.step(optimizer)
                     scaler.update()
                     
+                    # Move scheduler step here to avoid the warning
+                    # scheduler.step()  # Comment out - we'll do this at end of epoch instead
+                    
                     # Now we've completed one effective training step
                     global_step += 1
                     
@@ -561,13 +570,17 @@ def main():
                                      f'Time: {step_time:.2f}s')
                     
                     # Save and validate periodically
-                    if global_step % getattr(config.training, 'save_every', 1000) == 0:
+                    save_every = getattr(config.training, 'save_every', 2000)
+                    validate_every = getattr(config.training, 'validate_every', 1000)
+                    
+                    if global_step % save_every == 0:
                         save_checkpoint(
                             model, optimizer, scaler, global_step, epoch, true_loss, 
                             config, os.path.join(log_dir, f'ckpt_{global_step}.pth')
                         )
+                        logging.info(f'Saved checkpoint at step {global_step} (save_every={save_every})')
                     
-                    if global_step % getattr(config.training, 'validate_every', 500) == 0:
+                    if global_step % validate_every == 0:
                         val_loss = validate_model(model, val_loader, device, betas, t_intervals)
                         logging.info(f'Step {global_step} - Val Loss: {val_loss:.6f}')
                         
@@ -635,10 +648,13 @@ def main():
                 'epoch/epoch': epoch + 1,
             }, step=global_step)
         
-        save_checkpoint(
-            model, optimizer, scaler, global_step, epoch, avg_loss,
-            config, os.path.join(log_dir, 'ckpt.pth')
-        )
+        # Only save checkpoint at end of epoch if it's a multiple of 10 epochs (much less frequent)
+        if (epoch + 1) % 10 == 0:
+            save_checkpoint(
+                model, optimizer, scaler, global_step, epoch, avg_loss,
+                config, os.path.join(log_dir, f'ckpt_epoch_{epoch+1}.pth')
+            )
+            logging.info(f'Saved epoch checkpoint at epoch {epoch+1}')
     
     logging.info("Training completed!")
     logging.info(f"Best validation loss: {best_val_loss:.6f}")
