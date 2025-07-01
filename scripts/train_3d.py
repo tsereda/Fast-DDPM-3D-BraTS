@@ -602,14 +602,43 @@ def main():
                 # Step optimizer when we've accumulated enough gradients
                 if accumulation_steps >= gradient_accumulation_steps:
                     scaler.unscale_(optimizer)
+                    
+                    # Check for problematic gradients before clipping
+                    total_norm = 0.0
+                    param_count = 0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                                logging.error("NaN/Inf detected in gradients! Zeroing gradients.")
+                                optimizer.zero_grad()
+                                accumulated_loss = 0
+                                accumulation_steps = 0
+                                continue
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                            param_count += 1
+                    
+                    if param_count == 0:
+                        accumulated_loss = 0
+                        accumulation_steps = 0
+                        continue
+                        
+                    total_norm = total_norm ** (1. / 2)
+                    
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 
                         max_norm=getattr(config.training, 'gradient_clip', float('inf'))
                     )
                     
-                    # Add gradient norm diagnostic
+                    # Add gradient norm diagnostic with NaN handling
                     print(f"Gradient norm before scaling: {grad_norm:.6f}")
-                    if grad_norm > 5.0:  # Based on our stability config
+                    if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                        logging.error(f"NaN/Inf gradient norm detected! Skipping optimizer step.")
+                        scaler.update()  # Update scaler but skip optimizer step
+                        accumulated_loss = 0
+                        accumulation_steps = 0
+                        continue
+                    elif grad_norm > 1.0:  # Based on our updated stability config
                         logging.warning(f"High gradient norm detected: {grad_norm:.6f}")
                     
                     scaler.step(optimizer)

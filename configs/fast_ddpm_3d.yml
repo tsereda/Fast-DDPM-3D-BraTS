@@ -27,34 +27,34 @@ diffusion:
 training:
     batch_size: 1        # Small batch size for 3D
     epochs: 1000
-    learning_rate: 0.00002   # Even more conservative for late-training stability
-    weight_decay: 0.01       # Add weight decay for regularization
-    gradient_clip: 0.1       # Much tighter gradient clipping to prevent spikes
+    learning_rate: 0.00001   # Further reduced due to high gradient norms
+    weight_decay: 0.1        # Stronger regularization to control gradients
+    gradient_clip: 0.05      # Much stricter clipping to prevent NaN gradients
     save_every: 2000     # Save checkpoint every 2000 training steps (less frequent)
     validate_every: 1000 # Validate every 1000 training steps
     log_every_n_steps: 50
     # Gradient accumulation will be controlled via command line argument
     
-    # Loss scaling settings for stability - very conservative to prevent spikes
-    loss_scale_init: 128.0     # Even lower initial scale
-    loss_scale_growth: 500     # More frequent scale adjustments
-    loss_scale_backoff: 0.1    # Very aggressive scale reduction on overflow
-    loss_scale_max: 1024.0     # Cap maximum scale to prevent runaway scaling
+    # Loss scaling settings for stability - very conservative to prevent NaN
+    loss_scale_init: 64.0      # Lower scale to prevent overflow
+    loss_scale_growth: 2000    # Less frequent growth to maintain stability
+    loss_scale_backoff: 0.05   # Very aggressive reduction on any issues
+    loss_scale_max: 256.0      # Lower cap to prevent instability
     
 optim:
-    weight_decay: 0.01       # Add weight decay for regularization
+    weight_decay: 0.1            # Stronger regularization to control gradients
     optimizer: "Adam"
-    lr: 0.00002              # Match training.learning_rate
+    lr: 0.00001              # Match training.learning_rate - lower due to gradient issues
     beta1: 0.9
-    beta2: 0.999             # Default beta2 for better stability
+    beta2: 0.99              # Slightly lower beta2 for more stable gradient estimates
     amsgrad: false
-    eps: 0.00000001
+    eps: 0.0000001           # Slightly larger epsilon for numerical stability
 
 # Additional stability settings
 stability:
-    warmup_steps: 200           # Shorter warmup since training is progressing
-    memory_cleanup_interval: 25 # Very frequent cleanup to prevent memory issues
-    nan_check_interval: 10      # Very frequent NaN checks
-    max_loss_threshold: 50.0    # Much lower threshold to catch spikes early
-    gradient_norm_threshold: 5.0 # Alert if gradient norm gets too high
+    warmup_steps: 100           # Much shorter warmup to get to stable LR quickly
+    memory_cleanup_interval: 10 # Very frequent cleanup to prevent accumulation
+    nan_check_interval: 5       # Check for NaN every 5 steps
+    max_loss_threshold: 10.0    # Lower threshold since losses are ~0.5
+    gradient_norm_threshold: 1.0 # Much lower threshold - current norms are 5-16!
     lr_schedule: "cosine_annealing_warm_restarts"  # Better LR schedule for stability
