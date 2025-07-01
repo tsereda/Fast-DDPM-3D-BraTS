@@ -75,9 +75,9 @@ def sg_noise_estimation_loss(model,
         return (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
 
 
-def unified_4to4_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdim=False):
+def unified_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdim=False):
     """
-    Fixed 4→1 Fast-DDPM loss for unified BraTS modality synthesis
+    4→1 Fast-DDPM loss for unified BraTS modality synthesis
     
     Args:
         model: 3D diffusion model (outputs 1 channel)
@@ -188,5 +188,5 @@ loss_registry = {
     'sg': sg_noise_estimation_loss,
     'sr_3d': sr_noise_estimation_loss_3d,
     'sg_3d': sg_noise_estimation_loss_3d,
-    'unified_4to4': unified_4to4_loss
+    'unified_4to1': unified_4to1_loss
 }

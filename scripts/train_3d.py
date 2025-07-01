@@ -27,8 +27,8 @@ except ImportError:
 # Import required modules
 try:
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import unified_4to4_loss, calculate_psnr
-    from functions.denoising_3d import unified_4to4_generalized_steps
+    from functions.losses import unified_4to1_loss, calculate_psnr
+    from functions.denoising_3d import unified_4to1_generalized_steps_3d
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     print("✓ Successfully imported 3D components")
 except ImportError as e:
@@ -196,7 +196,7 @@ def validate_model(model, val_loader, device, betas, t_intervals):
             t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
             
-            loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+            loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
@@ -530,7 +530,7 @@ def main():
                 e = torch.randn_like(targets)
                 
                 with autocast():
-                    loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                    loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                     # Don't scale loss here - let gradient accumulation handle it naturally
                 
                 # Check for NaN/Inf loss

@@ -23,10 +23,10 @@ def test_inference_imports():
         return False
     
     try:
-        from functions.denoising_3d import unified_4to4_generalized_steps
-        print("✅ unified_4to4_generalized_steps import successful")
+        from functions.denoising_3d import unified_4to1_generalized_steps_3d
+        print("✅ unified_4to1_generalized_steps_3d import successful")
     except ImportError as e:
-        print(f"❌ unified_4to4_generalized_steps import failed: {e}")
+        print(f"❌ unified_4to1_generalized_steps_3d import failed: {e}")
         return False
     
     try:
@@ -43,10 +43,10 @@ def test_function_signatures():
     print("\n🔧 Testing function signatures...")
     
     try:
-        from functions.denoising_3d import unified_4to4_generalized_steps
+        from functions.denoising_3d import unified_4to1_generalized_steps_3d
         import inspect
         
-        sig = inspect.signature(unified_4to4_generalized_steps)
+        sig = inspect.signature(unified_4to1_generalized_steps_3d)
         params = list(sig.parameters.keys())
         
         expected_params = ['x', 'x_available', 'target_idx', 'seq', 'model', 'b']
@@ -106,7 +106,7 @@ def test_dummy_inference():
     
     try:
         from models.fast_ddpm_3d import FastDDPM3D
-        from functions.denoising_3d import unified_4to4_generalized_steps
+        from functions.denoising_3d import unified_4to1_generalized_steps_3d
         import yaml
         
         # Create dummy config

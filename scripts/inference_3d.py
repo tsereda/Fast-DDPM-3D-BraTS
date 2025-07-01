@@ -17,7 +17,7 @@ sys.path.append('.')
 sys.path.append('..')
 
 from models.fast_ddpm_3d import FastDDPM3D
-from functions.denoising_3d import generalized_steps_3d, unified_4to4_generalized_steps
+from functions.denoising_3d import generalized_steps_3d, unified_4to1_generalized_steps_3d
 from data.brain_3d_unified import BraTS3DUnifiedDataset
 from data.image_folder import get_available_3d_vol_names
 
@@ -276,7 +276,7 @@ def main():
             with torch.no_grad():
                 # Sampling - corrected function call
                 print("Generating...")
-                xs, x0_preds = unified_4to4_generalized_steps(
+                xs, x0_preds = unified_4to1_generalized_steps_3d(
                     x, input_batch, target_idx, seq, model, betas, eta=args.eta
                 )
                 

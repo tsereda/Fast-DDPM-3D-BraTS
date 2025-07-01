@@ -161,9 +161,9 @@ def sr_generalized_steps_3d(x, x_bw, x_fw, seq, model, b, **kwargs):
     return xs, x0_preds
 
 
-def unified_4to4_generalized_steps(x, x_available, target_idx, seq, model, b, **kwargs):
+def unified_4to1_generalized_steps_3d(x, x_available, target_idx, seq, model, b, **kwargs):
     """
-    Fixed unified 4→1 sampling for BraTS modality synthesis
+    Unified 4→1 sampling for BraTS modality synthesis
     
     Args:
         x: [B, 1, H, W, D] - noisy target modality (random noise initially)
@@ -173,7 +173,7 @@ def unified_4to4_generalized_steps(x, x_available, target_idx, seq, model, b, **
         model: diffusion model (outputs 1 channel, not 4)
         b: beta schedule
     
-    Note: Despite the name "4to4", this is actually 4→1 for compatibility with existing code
+    Returns 4 input modalities → 1 target modality
     """
     with torch.no_grad():
         device = x.device
