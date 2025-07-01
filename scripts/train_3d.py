@@ -230,7 +230,7 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
         img = alpha_cumprod_next.sqrt() * x0_t + c1 * et
     
     # Clamp the final sample to a valid image range
-    generated_sample = img.clamp(0.0, 1.0)
+    generated_sample = img.clamp(-1.0, 1.0)
     logging.info(f"Generated sample shape: {generated_sample.shape}, range: [{generated_sample.min():.3f}, {generated_sample.max():.3f}]")
 
     # --- Prepare slices for logging ---
@@ -247,6 +247,8 @@ def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device
 
     # Normalize slices to 0-1 range for better visualization
     def normalize_slice(slice_array):
+        # Convert from [-1, 1] model range to [0, 1] for visualization
+        slice_array = (slice_array + 1) / 2  # Convert [-1,1] to [0,1]
         slice_min, slice_max = slice_array.min(), slice_array.max()
         if slice_max > slice_min:
             return (slice_array - slice_min) / (slice_max - slice_min)
