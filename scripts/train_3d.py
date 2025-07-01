@@ -148,6 +148,137 @@ def load_checkpoint(path, model, optimizer, scaler, device):
     
     return checkpoint['epoch'], checkpoint['step'], checkpoint['loss']
 
+# --- START: W&B sample logging functions ---
+
+def get_diffusion_variables(betas):
+    """Pre-compute diffusion variables for sampling."""
+    device = betas.device
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, axis=0)
+    
+    return {
+        'alphas': alphas.to(device),
+        'alphas_cumprod': alphas_cumprod.to(device),
+    }
+
+@torch.no_grad()
+def log_sample_slices_to_wandb(model, batch, t_intervals, diffusion_vars, device, step):
+    """
+    Generates an image sample from the model using DDIM and logs 2D slices to W&B
+    for BraTS 4->4 modality synthesis.
+    """
+    logging.info(f"Starting W&B sample logging at step {step}")
+    model.eval()
+
+    # Use the provided fixed batch
+    inputs = batch['input'].to(device)    # [1, 4, H, W, D]
+    targets = batch['target'].to(device)  # [1, H, W, D]
+    targets = targets.unsqueeze(1)        # [1, 1, H, W, D]
+    target_idx = batch['target_idx'][0].item()  # Get the actual target index
+    
+    logging.info(f"Input shape: {inputs.shape}, Target shape: {targets.shape}, Target modality: {target_idx}")
+
+    # Generate a sample using the reverse diffusion process (DDIM)
+    shape = targets.shape
+    img = torch.randn(shape, device=device) # Start with pure noise
+
+    # Create the reverse timestep sequence from the training schedule
+    seq = t_intervals.cpu().numpy()
+    seq_next = [-1] + list(seq[:-1])
+    
+    logging.info(f"Diffusion sequence length: {len(seq)}")
+
+    # Reverse process
+    for i, j in tqdm(reversed(list(zip(seq, seq_next))), desc="Generating sample for W&B", total=len(seq), leave=False):
+        # Convert numpy scalars to Python ints for tensor indexing
+        i_int = int(i) if isinstance(i, (int, np.integer)) else int(i.item())
+        j_int = int(j) if isinstance(j, (int, np.integer)) and j >= 0 else -1
+        
+        t = torch.full((shape[0],), i_int, device=device, dtype=torch.long)
+        
+        # Create model input by replacing target channel with noisy image
+        model_input = inputs.clone()
+        model_input[:, target_idx:target_idx+1] = img  # Use correct target channel
+        
+        # Predict noise using the model
+        et = model(model_input, t.float())
+        
+        # Handle tuple output for variance learning models
+        if isinstance(et, tuple):
+            et = et[0]  # Use mean prediction only
+
+        # DDIM update rule - get alpha values directly as tensors
+        alpha_cumprod_t = diffusion_vars['alphas_cumprod'][i_int].to(device)
+        if j_int >= 0:
+            alpha_cumprod_next = diffusion_vars['alphas_cumprod'][j_int].to(device)
+        else:
+            alpha_cumprod_next = torch.tensor(1.0, device=device)
+        
+        # Ensure proper broadcasting shape for 5D tensors
+        alpha_cumprod_t = alpha_cumprod_t.view(1, 1, 1, 1, 1)
+        alpha_cumprod_next = alpha_cumprod_next.view(1, 1, 1, 1, 1)
+        
+        # Predicted x0
+        x0_t = (img - et * (1 - alpha_cumprod_t).sqrt()) / alpha_cumprod_t.sqrt()
+        
+        # Direction pointing to x_t
+        c1 = (1 - alpha_cumprod_next).sqrt()
+        
+        # Update
+        img = alpha_cumprod_next.sqrt() * x0_t + c1 * et
+    
+    # Clamp the final sample to a valid image range
+    generated_sample = img.clamp(-1.0, 1.0)
+    logging.info(f"Generated sample shape: {generated_sample.shape}, range: [{generated_sample.min():.3f}, {generated_sample.max():.3f}]")
+
+    # --- Prepare slices for logging ---
+    # We'll take the middle slice from the depth axis
+    slice_idx = generated_sample.shape[-1] // 2
+    
+    # Get the modality names for better captions
+    modality_names = ['T1c', 'T1n', 'T2f', 'T2w']
+    target_modality_name = modality_names[target_idx] if target_idx < len(modality_names) else f"Modality_{target_idx}"
+
+    # Get slices (convert to numpy for visualization)
+    # Show one of the input modalities for context (use a different one than target)
+    input_modality_idx = (target_idx + 1) % 4  # Use next modality as input example
+    input_modality_name = modality_names[input_modality_idx]
+    input_slice = inputs[0, input_modality_idx, :, :, slice_idx].cpu().numpy()
+
+    # Ground truth and generated sample
+    target_slice = targets[0, 0, :, :, slice_idx].cpu().numpy()
+    generated_slice = generated_sample[0, 0, :, :, slice_idx].cpu().numpy()
+
+    # Normalize slices to 0-1 range for better visualization
+    def normalize_slice(slice_array):
+        # Convert from [-1, 1] model range to [0, 1] for visualization
+        return (slice_array + 1) / 2  # Simple conversion from [-1,1] to [0,1]
+
+    input_slice = normalize_slice(input_slice)
+    target_slice = normalize_slice(target_slice)
+    generated_slice = normalize_slice(generated_slice)
+
+    # Log to W&B as a gallery of images for side-by-side comparison
+    if not WANDB_AVAILABLE:
+        logging.error("W&B is not available, cannot log images")
+        return
+    
+    log_dict = {
+        "samples/modality_synthesis": [
+            wandb.Image(input_slice, caption=f"Input: {input_modality_name} (Step {step})"),
+            wandb.Image(generated_slice, caption=f"Generated: {target_modality_name} (Step {step})"),
+            wandb.Image(target_slice, caption=f"Ground Truth: {target_modality_name} (Step {step})")
+        ]
+    }
+
+    wandb.log(log_dict, step=step)
+    logging.info(f"Successfully logged sample slices to W&B at step {step}")
+    logging.info(f"Slice shapes - Input: {input_slice.shape}, Generated: {generated_slice.shape}, Target: {target_slice.shape}")
+    
+    model.train() # Set model back to training mode
+
+# --- END: W&B sample logging functions ---
+
 def validate_model(model, val_loader, device, betas, t_intervals):
     """Validation loop - FIXED to not create new batches"""
     model.eval()
@@ -385,7 +516,27 @@ def main():
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
 
+    # --- START: Added diffusion vars for W&B logging ---
+    diffusion_vars = get_diffusion_variables(betas) if use_wandb else None
+    if diffusion_vars:
+        # Ensure all diffusion variables are on the correct device
+        for key in diffusion_vars:
+            diffusion_vars[key] = diffusion_vars[key].to(device)
+    # --- END: Added diffusion vars ---
+
     scaler = GradScaler()
+    
+    # --- START: Get fixed batch for W&B sample logging ---
+    # Get a fixed batch from the validation set for consistent logging
+    fixed_val_batch = None
+    if use_wandb and len(val_loader) > 0:
+        try:
+            fixed_val_batch = next(iter(val_loader))
+            logging.info("Grabbed a fixed validation batch for W&B logging.")
+        except StopIteration:
+            fixed_val_batch = None
+            logging.warning("Validation loader is empty, cannot log sample slices.")
+    # --- END: Get fixed batch ---
     
     start_epoch = 0
     start_step = 0
@@ -404,6 +555,22 @@ def main():
     
     step = start_step
     best_val_loss = float('inf')
+    
+    # Log initial sample to W&B if enabled
+    if use_wandb and fixed_val_batch and diffusion_vars:
+        logging.info("Logging initial sample to W&B...")
+        try:
+            log_sample_slices_to_wandb(
+                model.module if isinstance(model, nn.DataParallel) else model,
+                fixed_val_batch,
+                t_intervals,
+                diffusion_vars,
+                device,
+                step=0
+            )
+            logging.info("Successfully logged initial sample to W&B")
+        except Exception as e:
+            logging.error(f"Failed to log initial sample to W&B: {e}")
     
     for epoch in range(start_epoch, config.training.epochs):
         model.train()
@@ -489,6 +656,19 @@ def main():
                             'val/loss': val_loss,
                             'val/epoch': epoch,
                         }, step=step)
+                        
+                        # --- START: Call to the W&B sample logging function ---
+                        if fixed_val_batch and diffusion_vars:
+                            log_sample_slices_to_wandb(
+                                # unwrap model from DataParallel if used
+                                model.module if isinstance(model, nn.DataParallel) else model,
+                                fixed_val_batch,
+                                t_intervals,
+                                diffusion_vars,
+                                device,
+                                step
+                            )
+                        # --- END: Call to the W&B sample logging function ---
                     
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
