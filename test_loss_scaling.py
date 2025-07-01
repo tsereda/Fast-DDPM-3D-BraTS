@@ -21,8 +21,8 @@ def test_loss_scaling():
     """Test the fixed loss scaling"""
     print("Testing loss scaling fixes...")
     
-    # Load config
-    config_path = '/root/Fast-DDPM-3D-BraTS/configs/fast_ddpm_3d.yml'
+    # Load config - use relative path since we're in the project directory
+    config_path = 'configs/fast_ddpm_3d.yml'
     with open(config_path, 'r') as f:
         config_dict = yaml.safe_load(f)
     
