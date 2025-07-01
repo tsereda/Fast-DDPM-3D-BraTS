@@ -1,6 +1,6 @@
 data:
     dataset: "BraTS3D"
-    volume_size: [80, 80, 80]
+    volume_size: [64, 64, 64]  # Reduced from 80 for memory safety
     channels: 1
     num_workers: 4
 
@@ -11,7 +11,7 @@ model:
     ch: 64               # Reduced for 3D memory constraints
     ch_mult: [1, 2, 4]   # Reduced depth for 3D
     num_res_blocks: 2
-    attn_resolutions: [20]  # Adjusted for 80x80x80 volumes
+    attn_resolutions: [16]  # Adjusted for 64x64x64 volumes
     dropout: 0.1
     var_type: fixedsmall
     ema_rate: 0.9999
@@ -27,17 +27,24 @@ diffusion:
 training:
     batch_size: 1        # Small batch size for 3D
     epochs: 1000
-    learning_rate: 0.0001
+    learning_rate: 0.00001  # REDUCED from 0.0001 for stability with small batch
     weight_decay: 0.0
     gradient_clip: 1.0
     save_every: 1000
     validate_every: 500
     log_every_n_steps: 50
-
+    # Gradient accumulation will be controlled via command line argument
+    
 optim:
     weight_decay: 0.0
     optimizer: "Adam"
-    lr: 0.0001
+    lr: 0.00001  # REDUCED from 0.0001
     beta1: 0.9
     amsgrad: false
     eps: 0.00000001
+
+# Additional stability settings
+stability:
+    warmup_steps: 1000          # Gradual learning rate warmup
+    memory_cleanup_interval: 100 # Clear GPU cache every N steps
+    nan_check_interval: 50      # Check for NaN values in loss/gradients

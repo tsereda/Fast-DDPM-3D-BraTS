@@ -10,6 +10,7 @@ from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import logging
 import numpy as np
+import time
 
 # Add the current directory to path to import modules
 sys.path.append('.')
@@ -53,6 +54,7 @@ def parse_args():
     parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity (username or team)')
     parser.add_argument('--sample_every', type=int, default=500, help='Generate samples for W&B every N steps')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help='Gradient accumulation steps')
 
     return parser.parse_args()
 
@@ -292,10 +294,21 @@ def main():
     
     config.device = device
     
+    # Gradient accumulation settings
+    gradient_accumulation_steps = args.gradient_accumulation_steps
+    effective_batch_size = config.training.batch_size * gradient_accumulation_steps
+    
+    logging.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logging.info(f"Effective batch size: {effective_batch_size}")
+    
     # Setup W&B
     use_wandb = setup_wandb(args, config)
     if use_wandb:
         logging.info("✅ W&B initialized successfully")
+        wandb.config.update({
+            'gradient_accumulation_steps': gradient_accumulation_steps,
+            'effective_batch_size': effective_batch_size
+        })
     elif args.use_wandb and not WANDB_AVAILABLE:
         logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
     
@@ -436,6 +449,8 @@ def main():
     logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
     logging.info(f"Volume size: {volume_size}")
     logging.info(f"Batch size: {config.training.batch_size}")
+    logging.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logging.info(f"Effective batch size: {effective_batch_size}")
     
     step = start_step
     best_val_loss = float('inf')
@@ -443,11 +458,16 @@ def main():
     for epoch in range(start_epoch, config.training.epochs):
         model.train()
         epoch_loss = 0.0
+        accumulated_loss = 0.0
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{config.training.epochs}')
         for batch_idx, batch in enumerate(pbar):
             try:
-                optimizer.zero_grad()
+                step_start_time = time.time()
+                
+                # Zero gradients at the start of accumulation
+                if step % gradient_accumulation_steps == 0:
+                    optimizer.zero_grad()
                 
                 inputs = batch['input'].to(device)
                 targets = batch['target'].to(device).unsqueeze(1)
@@ -466,83 +486,105 @@ def main():
                 
                 with autocast():
                     loss = unified_4to4_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                    # Scale loss for gradient accumulation
+                    loss = loss / gradient_accumulation_steps
                 
                 scaler.scale(loss).backward()
+                accumulated_loss += loss.item()
                 
-                scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), 
-                    max_norm=getattr(config.training, 'gradient_clip', float('inf'))
-                )
-                
-                scaler.step(optimizer)
-                scaler.update()
-                
-                epoch_loss += loss.item()
-                
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.6f}',
-                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
-                    'target': f'{target_idx}'
-                })
-                
-                # W&B logging
-                if use_wandb and step % 10 == 0:
-                    wandb.log({
-                        'train/loss': loss.item(),
-                        'train/learning_rate': optimizer.param_groups[0]["lr"],
-                        'train/epoch': epoch,
-                        'train/step': step,
-                        'train/target_idx': target_idx,
-                        'train/grad_norm': grad_norm.item() if grad_norm > 0 else 0,
-                    }, step=step)
-                
-                if (batch_idx + 1) % args.log_every_n_steps == 0:
-                    logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
-                                 f'Batch {batch_idx+1}/{len(train_loader)} - '
-                                 f'Step Loss: {loss.item():.6f}, '
-                                 f'Target: {target_idx}, '
-                                 f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
-                
-                # Save and validate periodically
-                if step % getattr(config.training, 'save_every', 1000) == 0:
-                    save_checkpoint(
-                        model, optimizer, scaler, step, epoch, loss.item(), 
-                        config, os.path.join(log_dir, f'ckpt_{step}.pth')
+                # Step optimizer every gradient_accumulation_steps
+                if step % gradient_accumulation_steps == 0:
+                    scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), 
+                        max_norm=getattr(config.training, 'gradient_clip', float('inf'))
                     )
-                
-                if step % getattr(config.training, 'validate_every', 500) == 0:
-                    val_loss = validate_model(model, val_loader, device, betas, t_intervals)
-                    logging.info(f'Step {step} - Val Loss: {val_loss:.6f}')
                     
+                    scaler.step(optimizer)
+                    scaler.update()
+                    
+                    # Log the accumulated loss (which represents the true batch loss)
+                    true_loss = accumulated_loss
+                    epoch_loss += true_loss
+                    
+                    step_time = time.time() - step_start_time
+                    
+                    pbar.set_postfix({
+                        'loss': f'{true_loss:.6f}',
+                        'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                        'target': f'{target_idx}',
+                        'step_time': f'{step_time:.2f}s'
+                    })
+                    
+                    # W&B logging
                     if use_wandb:
                         wandb.log({
-                            'val/loss': val_loss,
-                            'val/epoch': epoch,
-                        }, step=step)
+                            'train/loss': true_loss,
+                            'train/learning_rate': optimizer.param_groups[0]["lr"],
+                            'train/epoch': epoch,
+                            'train/step': step // gradient_accumulation_steps,
+                            'train/target_idx': target_idx,
+                            'train/grad_norm': grad_norm.item() if grad_norm > 0 else 0,
+                            'train/loss_scale': scaler.get_scale(),
+                            'system/gpu_memory_mb': torch.cuda.max_memory_allocated() / 1024 / 1024,
+                            'system/step_time': step_time,
+                        }, step=step // gradient_accumulation_steps)
                     
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
+                    # Reset accumulated loss
+                    accumulated_loss = 0.0
+                    
+                    if (step // gradient_accumulation_steps) % args.log_every_n_steps == 0:
+                        logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
+                                     f'Step {step // gradient_accumulation_steps} - '
+                                     f'Loss: {true_loss:.6f}, '
+                                     f'Target: {target_idx}, '
+                                     f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
+                                     f'Time: {step_time:.2f}s')
+                    
+                    # Save and validate periodically (using effective steps)
+                    effective_step = step // gradient_accumulation_steps
+                    if effective_step % (getattr(config.training, 'save_every', 1000) // gradient_accumulation_steps) == 0:
                         save_checkpoint(
-                            model, optimizer, scaler, step, epoch, val_loss,
-                            config, os.path.join(log_dir, 'best_model.pth')
+                            model, optimizer, scaler, step, epoch, true_loss, 
+                            config, os.path.join(log_dir, f'ckpt_{effective_step}.pth')
                         )
-                        logging.info(f'New best validation loss: {val_loss:.6f}')
+                    
+                    if effective_step % (getattr(config.training, 'validate_every', 500) // gradient_accumulation_steps) == 0:
+                        val_loss = validate_model(model, val_loader, device, betas, t_intervals)
+                        logging.info(f'Step {effective_step} - Val Loss: {val_loss:.6f}')
                         
                         if use_wandb:
-                            wandb.run.summary["best_val_loss"] = val_loss
-                            wandb.run.summary["best_val_step"] = step
+                            wandb.log({
+                                'val/loss': val_loss,
+                                'val/epoch': epoch,
+                            }, step=effective_step)
+                        
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            save_checkpoint(
+                                model, optimizer, scaler, step, epoch, val_loss,
+                                config, os.path.join(log_dir, 'best_model.pth')
+                            )
+                            logging.info(f'New best validation loss: {val_loss:.6f}')
+                            
+                            if use_wandb:
+                                wandb.run.summary["best_val_loss"] = val_loss
+                                wandb.run.summary["best_val_step"] = effective_step
+                    
+                    # Sample logging (using effective steps)
+                    if use_wandb and fixed_val_batch and effective_step % (args.sample_every // gradient_accumulation_steps) == 0:
+                        log_samples_to_wandb(
+                            model.module if isinstance(model, nn.DataParallel) else model,
+                            fixed_val_batch,
+                            t_intervals,
+                            betas,
+                            device,
+                            effective_step
+                        )
                 
-                # Sample logging
-                if use_wandb and fixed_val_batch and step % args.sample_every == 0:
-                    log_samples_to_wandb(
-                        model.module if isinstance(model, nn.DataParallel) else model,
-                        fixed_val_batch,
-                        t_intervals,
-                        betas,
-                        device,
-                        step
-                    )
+                # Clear GPU memory cache periodically
+                if step % (gradient_accumulation_steps * 10) == 0:
+                    torch.cuda.empty_cache()
             
             except Exception as e:
                 logging.error(f"Error in training step {step}: {e}")
@@ -552,7 +594,7 @@ def main():
         
         # End of epoch
         scheduler.step()
-        avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else 0
+        avg_loss = epoch_loss / (len(train_loader) // gradient_accumulation_steps) if len(train_loader) > 0 else 0
         logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
         
         if use_wandb:
@@ -560,7 +602,7 @@ def main():
                 'epoch/avg_loss': avg_loss,
                 'epoch/learning_rate': optimizer.param_groups[0]["lr"],
                 'epoch/epoch': epoch + 1,
-            }, step=step)
+            }, step=step // gradient_accumulation_steps)
         
         save_checkpoint(
             model, optimizer, scaler, step, epoch, avg_loss,

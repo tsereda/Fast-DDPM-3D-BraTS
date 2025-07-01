@@ -62,7 +62,7 @@ spec:
             fi
           done
           
-          pip install pyyaml torch tqdm numpy nibabel wandb matplotlib
+          pip install pyyaml torch tqdm numpy nibabel wandb matplotlib medpy
           
           echo "Checking W&B configuration..."
           python -c "import wandb; print(f'W&B version: {wandb.__version__}')"
