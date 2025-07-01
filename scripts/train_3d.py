@@ -559,16 +559,15 @@ def main():
                 n = inputs.size(0)
                 
                 # Fast-DDPM antithetic sampling
-                idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
-                idx_2 = len(t_intervals) - idx_1 - 1
-                idx = torch.cat([idx_1, idx_2], dim=0)[:n]
+                idx = torch.randint(0, len(t_intervals), size=(n,))
                 t = t_intervals[idx].to(device)
                 
                 e = torch.randn_like(targets)
                 
-                with autocast():
-                    loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                # with autocast():
+                #     loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                     # Don't scale loss here - let gradient accumulation handle it naturally
+                loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                 
                 # Check for NaN/Inf loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -586,10 +585,8 @@ def main():
                 elif loss_value < 1e-8:
                     logging.warning(f"Very small loss detected: {loss_value:.6e} - possible underflow")
                 
-                # Scale loss for gradient accumulation BEFORE backward pass
-                scaled_loss = loss / gradient_accumulation_steps
-                scaler.scale(scaled_loss).backward()
-                accumulated_loss += loss.item()  # Accumulate the original (unscaled) loss for logging
+                scaler.scale(loss).backward()
+                accumulated_loss += loss.item()
                 accumulation_steps += 1
                 
                 # Step optimizer when we've accumulated enough gradients

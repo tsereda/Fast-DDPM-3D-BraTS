@@ -116,7 +116,7 @@ def unified_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepd
         return mse_loss.view(mse_loss.size(0), -1).mean(dim=1)
     else:
         # Return scalar loss, properly normalized
-        return mse_loss.mean()
+        return mse_loss.mean() * 1000
 
 
 # 3D versions of existing loss functions
