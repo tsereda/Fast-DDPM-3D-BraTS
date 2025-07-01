@@ -290,8 +290,11 @@ def validate_model(model, val_loader, device, betas, timesteps):
             # Use full timestep range for validation loss for consistency
             t = torch.randint(0, len(betas), (n,), device=device)
             e = torch.randn_like(targets)
+
+            batch = next(iter(train_loader))
+            target_idx = batch.get('target_idx', 0) 
             
-            loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas)
+            loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
@@ -585,7 +588,9 @@ def main():
                         from functions.losses import fast_ddpm_loss
                         loss = fast_ddpm_loss(model, inputs, targets, t, e, betas, var_type=var_type)
                     else:
-                        loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas)
+                        batch = next(iter(train_loader))
+                        target_idx = batch.get('target_idx', 0)
+                        loss = sg_noise_estimation_loss(model, inputs, targets, t, e, betas, target_idx=target_idx)
                 
                 scaler.scale(loss).backward()
                 

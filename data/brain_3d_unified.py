@@ -1,8 +1,3 @@
-"""
-3D Unified BraTS Dataset for Fast-DDPM
-Supports 4→4 unified training approach
-"""
-
 import os
 import torch
 from torch.utils.data import Dataset
@@ -12,15 +7,10 @@ from pathlib import Path
 import random
 import logging
 
-# Setup logging
 logger = logging.getLogger(__name__)
 
 
 class BraTS3DUnifiedDataset(Dataset):
-    """
-    Unified BraTS 3D Dataset for 4→4 modality synthesis
-    """
-    
     def __init__(self, data_root, phase='train', volume_size=(96, 96, 96), 
                  min_input_modalities=1, max_input_modalities=3):
         self.data_root = Path(data_root)
@@ -254,9 +244,12 @@ class BraTS3DUnifiedDataset(Dataset):
         assert target_volume.shape == self.volume_size, \
             f"Target shape mismatch: {target_volume.shape} vs expected {self.volume_size}"
         
+        # REMOVED DEBUG PRINTS - these were causing issues and slowing training
+        
         return {
             'input': input_modalities,  # [4, H, W, D]
             'target': target_volume,    # [H, W, D]
+            'target_idx': target_idx,   # CRITICAL: Now properly passed
             'case_name': case_dir.name,
             'target_modality': target_modality,
             'available_modalities': available_modalities
@@ -298,6 +291,7 @@ def test_dataset():
                 print(f"✅ Sample loaded successfully")
                 print(f"  Input shape: {sample['input'].shape}")
                 print(f"  Target shape: {sample['target'].shape}")
+                print(f"  Target idx: {sample['target_idx']}")
                 print(f"  Case name: {sample['case_name']}")
                 print(f"  Target modality: {sample['target_modality']}")
                 print(f"  Available modalities: {sample['available_modalities']}")
