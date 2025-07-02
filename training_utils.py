@@ -119,7 +119,7 @@ def load_checkpoint(path, model, optimizer, scaler, device):
 
 def validate_model(model, val_loader, device, betas, t_intervals):
     """Validation loop"""
-    from functions.losses import streamlined_4to1_loss
+    from functions.losses import brats_ddpm_loss
     
     model.eval()
     total_loss = 0
@@ -137,7 +137,7 @@ def validate_model(model, val_loader, device, betas, t_intervals):
             t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
             
-            loss = streamlined_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+            loss = brats_ddpm_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
