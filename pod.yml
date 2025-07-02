@@ -78,9 +78,10 @@ spec:
             --use_ddp \
             --port auto \
             --use_wandb \
-            --sa
+            --sample_every 1 \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
+
             --doc pod-multigpu-training-$(date +%Y%m%d-%H%M%S)
           
           tail -f /dev/null

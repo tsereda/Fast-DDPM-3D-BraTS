@@ -137,8 +137,6 @@ def main():
                     cmd.extend(['--wandb_entity', args.wandb_entity])
             if args.sample_every is not None:
                 cmd.extend(['--sample_every', str(args.sample_every)])
-            if args.sample_every is not None:
-                cmd.extend(['--sample_every', str(args.sample_every)])
             
             print(f"Starting process {i} on GPU {gpu_id}")
             print(f"Command: {' '.join(cmd)}")
@@ -202,8 +200,6 @@ def main():
             cmd.extend(['--use_wandb', '--wandb_project', args.wandb_project])
             if args.wandb_entity:
                 cmd.extend(['--wandb_entity', args.wandb_entity])
-        if args.sample_every is not None:
-            cmd.extend(['--sample_every', str(args.sample_every)])
         if args.sample_every is not None:
             cmd.extend(['--sample_every', str(args.sample_every)])
         
