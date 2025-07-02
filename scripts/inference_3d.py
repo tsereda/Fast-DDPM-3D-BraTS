@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-3D Fast-DDPM Inference Script for BraTS Modality Synthesis
+Fixed 3D Fast-DDPM Inference Script for BraTS Modality Synthesis
+Now consistent with [0,1] normalization approach
 """
 
 import os
@@ -118,7 +119,10 @@ def find_modality_files(case_path, modalities):
 
 
 def load_brats_case(case_path, modalities, volume_size, target_modality):
-    """Load a BraTS case with available modalities"""
+    """
+    Load a BraTS case with available modalities
+    🔥 FIXED: Now uses [0,1] normalization to match training
+    """
     
     def reorient_volume(nifti_img):
         orig_ornt = nib.orientations.io_orientation(nifti_img.affine)
@@ -132,13 +136,16 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
         data = data[8:152, 24:216, 24:216]
         return data
     
-    def normalize_volume(volume):
+    def normalize_volume_0_1(volume):
+        """
+        🔥 FIXED: Professor's [0,1] normalization (not [-1,1])
+        """
         v_min = np.amin(volume)
         v_max = np.amax(volume) 
         if v_max > v_min:
-            # Normalize to [-1, 1] range to match training data
-            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
-        return volume
+            # Normalize to [0,1] range to match training data
+            volume = (volume - v_min) / (v_max - v_min)
+        return np.clip(volume, 0.0, 1.0)
     
     # Find available files
     vol_files = find_modality_files(case_path, modalities)
@@ -154,7 +161,7 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
             nifti_img = nib.load(str(file_path))
             nifti_img = reorient_volume(nifti_img)
             data = crop_volume(nifti_img)
-            data = normalize_volume(data)
+            data = normalize_volume_0_1(data)  # 🔥 FIXED: [0,1] not [-1,1]
             
             # Resize if needed
             if data.shape != volume_size:
@@ -193,11 +200,12 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
 
 
 def save_generated_volume(volume, affine, output_path):
-    """Save generated volume as NIfTI"""
+    """
+    🔥 FIXED: Save generated volume assuming [0,1] input range
+    """
     volume_np = volume.cpu().numpy()
     
-    # Denormalize from [-1, 1] to [0, 1] range
-    volume_np = (volume_np + 1) / 2
+    # Already in [0,1] range from sigmoid output
     volume_np = np.clip(volume_np, 0, 1)
     
     # Scale to appropriate intensity range (0-1000 for medical images)
@@ -251,7 +259,9 @@ def main():
     
     # Process cases
     modalities = ['t1n', 't1c', 't2w', 't2f']
-    volume_size = tuple(config.data.volume_size)
+    
+    # 🔥 FIXED: Use crop_size not volume_size
+    volume_size = tuple(config.data.crop_size)
     
     # Find all case directories
     input_path = Path(args.input_dir)
@@ -288,12 +298,14 @@ def main():
             modality_order = ['t1n', 't1c', 't2w', 't2f']
             target_idx = modality_order.index(args.target_modality)
             
-            # Initial noise
+            # Initial noise - 🔥 FIXED: Appropriate range for [0,1] model
             noise_shape = (1, 1, *volume_size)
-            x = torch.randn(noise_shape).to(device)
+            x = torch.rand(noise_shape).to(device)  # [0,1] noise instead of Gaussian
             
             print(f"Input shape: {input_batch.shape}")
+            print(f"Input range: [{input_batch.min():.3f}, {input_batch.max():.3f}]")
             print(f"Noise shape: {x.shape}")
+            print(f"Noise range: [{x.min():.3f}, {x.max():.3f}]")
             print(f"Target index: {target_idx}")
             
             with torch.no_grad():
@@ -306,8 +318,8 @@ def main():
                 # Get final result
                 generated = xs[-1].squeeze(0).squeeze(0)  # [H, W, D]
                 
-                # Clamp to valid range
-                generated = torch.clamp(generated, -1, 1)
+                # Clamp to valid [0,1] range
+                generated = torch.clamp(generated, 0, 1)
                 
                 print(f"Generated shape: {generated.shape}")
                 print(f"Generated range: [{generated.min():.3f}, {generated.max():.3f}]")
