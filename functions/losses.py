@@ -96,10 +96,11 @@ def brats_4to1_loss(model,
     # Model predicts noise
     output = model(model_input, t.float())
     
+    # Use mean for proper loss scaling instead of sum
     if keepdim:
-        return (e - output).square().sum(dim=(1, 2, 3, 4))
+        return (e - output).square().mean(dim=(1, 2, 3, 4))
     else:
-        return (e - output).square().sum(dim=(1, 2, 3, 4)).mean(dim=0)
+        return (e - output).square().mean()
 
 
 def brats_multimodal_loss(model,

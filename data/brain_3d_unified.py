@@ -129,30 +129,31 @@ class BraTS3DUnifiedDataset(Dataset):
         return result
     
     def _normalize_volume(self, volume):
-        """Normalize volume to [-1, 1] range"""
+        """Simplified, robust normalization to [-1, 1] range"""
         # Handle zero or constant volumes
         if not np.any(volume > 0):
             return np.zeros_like(volume)
         
-        # Get non-zero voxels for robust normalization
-        valid_voxels = volume[volume > 0]
-        if len(valid_voxels) == 0:
+        # Simple min-max normalization for stability
+        vmin = volume.min()
+        vmax = volume.max()
+        
+        if vmax <= vmin:
             return np.zeros_like(volume)
         
-        # Use 1st and 99th percentile for robust normalization
-        p1, p99 = np.percentile(valid_voxels, [1, 99])
+        # Normalize to [0, 1] first
+        volume = (volume - vmin) / (vmax - vmin + 1e-8)
         
-        if p99 <= p1:
+        # Scale to [-1, 1]
+        volume = 2 * volume - 1
+        
+        # Final validation
+        if np.any(np.isnan(volume)) or np.any(np.isinf(volume)):
+            logger.warning("NaN/Inf values detected after normalization, using zero volume")
             return np.zeros_like(volume)
         
-        # Normalize to [-1, 1]
-        volume = np.clip(volume, p1, p99)
-        volume = 2 * (volume - p1) / (p99 - p1) - 1
-        
-        # Check for NaN values
-        if np.any(np.isnan(volume)):
-            logger.warning("NaN values detected, using zero volume")
-            return np.zeros_like(volume)
+        # Ensure range is correct
+        volume = np.clip(volume, -1.0, 1.0)
         
         return volume
     

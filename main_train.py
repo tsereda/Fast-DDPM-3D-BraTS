@@ -362,6 +362,22 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 targets = inputs['target'].unsqueeze(1)
                 target_idx = inputs['target_idx'][0].item()
                 
+                # Data validation to catch issues early
+                if torch.isnan(inputs['input']).any() or torch.isinf(inputs['input']).any():
+                    if is_main_process(rank):
+                        logging.warning(f"Invalid input data detected in batch {batch_idx}, skipping")
+                    continue
+                
+                if torch.isnan(targets).any() or torch.isinf(targets).any():
+                    if is_main_process(rank):
+                        logging.warning(f"Invalid target data detected in batch {batch_idx}, skipping")
+                    continue
+                
+                # Verify data range
+                if inputs['input'].abs().max() > 2.0 or targets.abs().max() > 2.0:
+                    if is_main_process(rank):
+                        logging.warning(f"Data outside expected range [-1,1]: input_max={inputs['input'].abs().max():.3f}, target_max={targets.abs().max():.3f}")
+                
                 n = inputs['input'].size(0)
                 
                 # Fast-DDPM antithetic sampling
