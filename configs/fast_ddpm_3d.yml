@@ -3,7 +3,7 @@
 
 data:
     dataset: "BraTS3D"
-    volume_size: [64, 64, 64]  # Conservative for memory
+    volume_size: [100, 100, 100]  # Conservative for memory
     channels: 1               # Output channels (target modality)
     num_workers: 4
 
@@ -29,9 +29,9 @@ diffusion:
 
 training:
     batch_size: 1                  # Small for 3D memory constraints (per GPU)
-    gradient_accumulation_steps: 4   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
+    gradient_accumulation_steps: 2   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.00001          # Conservative for stability
+    learning_rate: 0.00005          # Conservative for stability
     weight_decay: 0.0
     gradient_clip: 1.0
     
@@ -58,7 +58,12 @@ sampling:
     timesteps: 10                   # Fast-DDPM: only 10 steps
     scheduler_type: "uniform"       # or "non-uniform"
     eta: 0.0                       # DDIM parameter
-    batch_size: 1
+    batch_size: 2
+    
+    # Noise initialization
+    init_type: "gaussian"          # Use Gaussian noise instead of zeros
+    noise_std: 1.0                 # Standard deviation for Gaussian noise
+    noise_mean: 0.0                # Mean for Gaussian noise
 
 # Device and precision
 device: "cuda"
