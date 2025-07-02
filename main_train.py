@@ -24,7 +24,7 @@ sys.path.append('..')
 try:
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import brats_ddpm_loss
+    from functions.losses import brats_4to1_loss
 except ImportError as e:
     logging.error(f"Failed to import modules: {e}")
     sys.exit(1)
@@ -374,7 +374,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Enhanced loss computation with memory management
                 with autocast():
-                    loss = brats_ddpm_loss(model, inputs['input'], targets, t, e, b=betas, target_idx=target_idx)
+                    loss = brats_4to1_loss(model, inputs['input'], targets, t, e, b=betas, target_idx=target_idx)
                 
                 # Enhanced loss validation
                 if torch.isnan(loss) or torch.isinf(loss):
