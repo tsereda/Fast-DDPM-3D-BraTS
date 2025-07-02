@@ -28,12 +28,17 @@ diffusion:
     num_diffusion_timesteps: 1000
 
 training:
-    batch_size: 1                  # Small for 3D memory constraints
-    gradient_accumulation_steps: 4   # Effective batch size = 4
+    batch_size: 1                  # Small for 3D memory constraints (per GPU)
+    gradient_accumulation_steps: 4   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
     epochs: 1000
     learning_rate: 0.00001          # Conservative for stability
     weight_decay: 0.0
     gradient_clip: 1.0
+    
+    # Multi-GPU settings
+    multi_gpu: true                 # Enable multi-GPU training
+    distributed: false              # Use DataParallel (false) or DistributedDataParallel (true)
+    sync_batchnorm: true           # Synchronize batch normalization across GPUs
     
     # Checkpointing
     save_every: 2000                # Save every 2000 steps
