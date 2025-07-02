@@ -8,6 +8,14 @@ spec:
   nodeSelector:
     topology.kubernetes.io/region: us-west
     nautilus.io/linstor: "true"
+  nodeAffinity:
+     requiredDuringSchedulingIgnoredDuringExecution:
+       nodeSelectorTerms:
+       - matchExpressions:
+         - key: nvidia.com/gpu.product
+           operator: In
+           values:
+           - NVIDIA-GeForce-GTX-1080-Ti
   
   containers:
     - name: brats-processing
@@ -19,7 +27,7 @@ spec:
         - name: PYTHONPATH
           value: /app/Fast-DDPM-3D-BraTS
         - name: CUDA_VISIBLE_DEVICES
-          value: "0,1"
+          value: "0"
         # nnUNet paths
         - name: nnUNet_raw
           value: /app/nnunet/raw
@@ -47,7 +55,7 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          git clone -b dev11 https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          git clone -b randomcropping https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
           
           sudo apt-get update && sudo apt-get install -y p7zip-full wget git
@@ -72,11 +80,8 @@ spec:
           python -c "import torch; print(f'GPUs available: {torch.cuda.device_count()}')"
           
           echo "Starting multi-GPU training with W&B logging..."
-          PYTHONUNBUFFERED=1 python train_multi_gpu.py \
+          PYTHONUNBUFFERED=1 python train.py \
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
-            --gpus auto \
-            --use_ddp \
-            --port auto \
             --use_wandb \
             --sample_every 50 \
             --wandb_project ${WANDB_PROJECT} \
@@ -97,11 +102,11 @@ spec:
         requests:
           memory: 24Gi                # Increased for multi-GPU
           cpu: "12"                   # Increased for multi-GPU
-          nvidia.com/gpu: "2"         # Request 2 GPUs (adjust as needed)
+          nvidia.com/gpu: "1"         # Request 2 GPUs (adjust as needed)
         limits:
           memory: 32Gi
           cpu: "16"
-          nvidia.com/gpu: "2"
+          nvidia.com/gpu: "1"
   
   volumes:
     - name: workspace
