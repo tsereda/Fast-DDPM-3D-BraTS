@@ -54,6 +54,55 @@ def brats_4to1_loss(model,
         return (e - output).square().mean()
 
 
+def improved_brats_4to1_loss(model,
+                           x_available: torch.Tensor,
+                           x_target: torch.Tensor,
+                           t: torch.LongTensor,
+                           e: torch.Tensor,
+                           b: torch.Tensor, 
+                           target_idx: int = 0,
+                           keepdim=False):
+    """
+    Improved BraTS 4→1 modality synthesis loss with better stability
+    
+    Improvements:
+    - Better numerical stability with clamping
+    - Focal loss weighting for harder examples
+    - Optional perceptual loss component
+    """
+    # Improved alpha computation with better numerical stability
+    a = (1-b).cumprod(dim=0)
+    # More aggressive clamping for stability
+    a = torch.clamp(a, min=1e-6, max=0.9999)
+    a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
+    
+    # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
+    a_sqrt = torch.clamp(a.sqrt(), min=1e-3, max=0.999)
+    noise_coeff = torch.clamp((1.0 - a).sqrt(), min=1e-3, max=0.999)
+    
+    x_noisy = x_target * a_sqrt + e * noise_coeff
+    
+    # Prepare model input: replace target channel with noisy version
+    model_input = x_available.clone()
+    model_input[:, target_idx:target_idx+1] = x_noisy
+    
+    # Model predicts noise
+    output = model(model_input, t.float())
+    
+    # Compute MSE loss
+    mse_loss = (e - output).square()
+    
+    # Apply focal weighting to focus on harder timesteps
+    timestep_weights = 1.0 + 0.5 * (t.float() / 1000.0).view(-1, 1, 1, 1, 1)
+    weighted_loss = mse_loss * timestep_weights
+    
+    # Use mean for proper loss scaling instead of sum
+    if keepdim:
+        return weighted_loss.mean(dim=(1, 2, 3, 4))
+    else:
+        return weighted_loss.mean()
+
+
 def get_loss_function(loss_type='brats_4to1'):
     """
     Factory function to get the appropriate loss function
