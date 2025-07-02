@@ -226,7 +226,8 @@ def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
         
         # Generate sample using simplified reverse process
         shape = targets.shape
-        img = torch.randn(shape, device=device)
+        initial_noise = torch.randn(shape, device=device)
+        img = initial_noise.clone()
         
         # Use the unified 4->1 sampling approach
         model_input = inputs.clone()
@@ -253,16 +254,22 @@ def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
         slice_idx = img.shape[-1] // 2
         modality_names = ['T1n', 'T1c', 'T2w', 'T2f']
         
-        # Collect all slices: 4 inputs + generated + target
+        # Collect all slices: 4 inputs (with noise for target) + generated + target
         all_slices = []
         titles = []
         
-        # Input modalities
+        # Input modalities - show noise for the target modality
+        noise_slice = (initial_noise[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
         for i in range(4):
-            slice_data = (inputs[0, i, :, :, slice_idx].cpu().numpy() + 1) / 2
+            if i == target_idx:
+                # Show noise for the target modality instead of the actual data
+                slice_data = noise_slice
+                titles.append(f'{modality_names[i]} (Noise) ⭐')
+            else:
+                # Show actual input data for non-target modalities
+                slice_data = (inputs[0, i, :, :, slice_idx].cpu().numpy() + 1) / 2
+                titles.append(f'{modality_names[i]}')
             all_slices.append(slice_data)
-            marker = " ⭐" if i == target_idx else ""
-            titles.append(f'{modality_names[i]}{marker}')
         
         # Generated
         generated_slice = (img[0, 0, :, :, slice_idx].cpu().numpy() + 1) / 2
@@ -276,7 +283,7 @@ def log_samples_to_wandb(model, batch, t_intervals, betas, device, step):
         
         # Create single row figure with all 6 images
         fig, axes = plt.subplots(1, 6, figsize=(18, 3))
-        fig.suptitle(f'Step {step} | Target: {modality_names[target_idx]}', fontsize=14)
+        fig.suptitle(f'Step {step} | Target: {modality_names[target_idx]} (starting from noise)', fontsize=14)
         
         # Plot all slices
         for i, (slice_data, title) in enumerate(zip(all_slices, titles)):
