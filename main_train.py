@@ -269,7 +269,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 'world_size': world_size,
                 'distributed': args.distributed,
                 'multi_gpu': args.multi_gpu
-            })
+            }, allow_val_change=True)
         elif args.use_wandb and not WANDB_AVAILABLE:
             logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
         

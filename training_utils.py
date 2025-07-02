@@ -64,17 +64,21 @@ def setup_logging(log_dir, args):
 def setup_wandb(args, config):
     """Initialize W&B if requested"""
     if args.use_wandb and WANDB_AVAILABLE:
+        # Prepare config dict, excluding values that will be updated later
+        wandb_config = {k: v for k, v in vars(args).items() 
+                       if k not in ['world_size', 'rank', 'local_rank']}
+        wandb_config.update({
+            'model_config': config.model.__dict__ if hasattr(config, 'model') else {},
+            'data_config': config.data.__dict__ if hasattr(config, 'data') else {},
+            'training_config': config.training.__dict__ if hasattr(config, 'training') else {},
+            'diffusion_config': config.diffusion.__dict__ if hasattr(config, 'diffusion') else {},
+        })
+        
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.doc,
-            config={
-                **vars(args),
-                'model_config': config.model.__dict__ if hasattr(config, 'model') else {},
-                'data_config': config.data.__dict__ if hasattr(config, 'data') else {},
-                'training_config': config.training.__dict__ if hasattr(config, 'training') else {},
-                'diffusion_config': config.diffusion.__dict__ if hasattr(config, 'diffusion') else {},
-            }
+            config=wandb_config
         )
         return True
     return False
