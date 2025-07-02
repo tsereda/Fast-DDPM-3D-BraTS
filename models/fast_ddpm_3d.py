@@ -39,7 +39,7 @@ def Normalize(in_channels, num_groups=32):
     # For very small channel counts, use LayerNorm instead
     if in_channels <= 8:
         # LayerNorm over spatial dimensions for medical images
-        return nn.GroupNorm(num_groups=1, num_channels=in_channels, eps=1e-6, affine=True)
+        return nn.GroupNorm(num_groups=1, num_channels=in_channels, eps=1e-5, affine=True)
     
     # Ensure minimum 4 channels per group for stable statistics
     min_channels_per_group = 4
@@ -61,7 +61,7 @@ def Normalize(in_channels, num_groups=32):
             target = min(32, in_channels // 4)
             num_groups = min(possible_groups, key=lambda x: abs(x - target))
     
-    return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
+    return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-5, affine=True)
 
 
 class Upsample3D(nn.Module):

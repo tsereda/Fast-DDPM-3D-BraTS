@@ -8,8 +8,11 @@ import torch
 def compute_alpha(beta, t):
     """Compute alpha values for 3D diffusion"""
     beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
-    # Shape for 5D: [B, 1, 1, 1, 1]
-    a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1, 1)
+    # Shape for 5D: [B, 1, 1, 1, 1] with clamping for numerical stability
+    a = (1 - beta).cumprod(dim=0)
+    # Clamp to prevent numerical instability
+    a = torch.clamp(a, min=1e-8, max=1.0)
+    a = a.index_select(0, t + 1).view(-1, 1, 1, 1, 1)
     return a
 
 

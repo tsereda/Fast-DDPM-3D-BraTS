@@ -31,8 +31,12 @@ def brats_4to1_loss(model,
     Returns:
         loss: noise prediction loss for target modality
     """
-    # a: cumulative alpha values (1-b).cumprod()  
-    a = (1-b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1, 1)
+    # a: cumulative alpha values (1-b).cumprod() with clamping for numerical stability
+    a = (1-b).cumprod(dim=0)
+    # Clamp to prevent numerical instability
+    a = torch.clamp(a, min=1e-8, max=1.0)
+    a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
+    
     # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
     x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
     

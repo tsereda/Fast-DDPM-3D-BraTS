@@ -3,7 +3,7 @@
 
 data:
     dataset: "BraTS3D"
-    crop_size: [128, 128, 64]   
+    crop_size: [64, 64, 64]   
     crops_per_volume: 4    
     channels: 1    
     num_workers: 4

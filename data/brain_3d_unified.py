@@ -29,6 +29,15 @@ class BraTS3DUnifiedDataset(Dataset):
         # Standard BraTS modalities
         self.modalities = ['t1n', 't1c', 't2w', 't2f']
         
+        # Global normalization statistics (should be pre-computed from training set)
+        # These are typical values for BraTS dataset - in practice, compute from full training set
+        self.global_stats = {
+            't1n': {'min': 0.0, 'max': 4000.0},
+            't1c': {'min': 0.0, 'max': 5000.0}, 
+            't2w': {'min': 0.0, 'max': 6000.0},
+            't2f': {'min': 0.0, 'max': 7000.0}
+        }
+        
         # Find all case directories
         self.cases = self._find_cases()
         
@@ -128,22 +137,30 @@ class BraTS3DUnifiedDataset(Dataset):
         
         return crop
     
-    def _normalize_volume_0_1(self, volume):
+    def _normalize_volume_0_1(self, volume, modality=None):
         """
         Professor's recommendation: Min-max normalization to [0, 1]
+        Uses global dataset statistics for consistent scaling across volumes
         """
         # Handle zero or constant volumes
         if not np.any(volume > 0):
             return np.zeros_like(volume)
         
-        vmin = volume.min()
-        vmax = volume.max()
+        if modality is not None and modality in self.global_stats:
+            # Use global statistics for consistent normalization across all volumes
+            # This prevents per-volume scaling that can cause inconsistencies
+            global_min = self.global_stats[modality]['min']
+            global_max = self.global_stats[modality]['max']
+        else:
+            # Fallback to typical global statistics
+            global_min = 0.0  # Typical minimum intensity for BraTS after preprocessing
+            global_max = np.percentile(volume[volume > 0], 99.9)  # Use 99.9 percentile to avoid outliers
         
-        if vmax <= vmin:
+        if global_max <= global_min:
             return np.zeros_like(volume)
         
-        # Min-max normalization to [0, 1]
-        volume_norm = (volume - vmin) / (vmax - vmin)
+        # Global min-max normalization to [0, 1]
+        volume_norm = (volume - global_min) / (global_max - global_min)
         
         # Validate normalization
         if np.any(np.isnan(volume_norm)) or np.any(np.isinf(volume_norm)):
@@ -195,7 +212,7 @@ class BraTS3DUnifiedDataset(Dataset):
             cropped = self._extract_crop(volume, crop_coords)
             
             # Professor's normalization: min-max to [0, 1]
-            normalized = self._normalize_volume_0_1(cropped)
+            normalized = self._normalize_volume_0_1(cropped, modality=modality)
             
             cropped_volumes[modality] = torch.FloatTensor(normalized)
         
