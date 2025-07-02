@@ -81,7 +81,6 @@ spec:
             --sample_every 50 \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
-
             --doc pod-multigpu-training-$(date +%Y%m%d-%H%M%S)
           
           tail -f /dev/null

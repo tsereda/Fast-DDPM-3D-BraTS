@@ -335,17 +335,16 @@ def simple_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdi
         return loss.mean()
 
 
-# Registry for backwards compatibility
+# Registry for loss functions
 loss_registry = {
-    'unified_4to1': streamlined_4to1_loss,
+    'streamlined': streamlined_4to1_loss,  # Recommended default
+    'enhanced': enhanced_4to1_loss,        # Full medical components
+    'simple': simple_4to1_loss,            # Ultra-minimal version
+    # Task-specific aliases
     'enhanced_4to1': enhanced_4to1_loss,
     'simple_4to1': simple_4to1_loss,
-    'streamlined': streamlined_4to1_loss,  # Recommended default
-    # Legacy mappings
-    'sg': streamlined_4to1_loss,  # Single condition tasks
-    'sr': streamlined_4to1_loss,  # Multi condition tasks
-    'simple': simple_4to1_loss,  # Ultra-minimal version
-    'enhanced': enhanced_4to1_loss  # Full medical components
+    'sg': streamlined_4to1_loss,           # Single condition tasks
+    'sr': streamlined_4to1_loss,           # Multi condition tasks
 }
 
 class SSIM3D(nn.Module):
@@ -542,3 +541,17 @@ def validate_loss_inputs(x_available, x_target, t, e, b, target_idx):
         
     except Exception:
         return False
+
+
+# Export list
+__all__ = [
+    'streamlined_4to1_loss',
+    'enhanced_4to1_loss', 
+    'simple_4to1_loss',
+    'loss_registry',
+    'get_loss_function',
+    'validate_loss_inputs',
+    'SSIM3D',
+    'GradientLoss3D',
+    'FFParser3D'
+]
