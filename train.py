@@ -14,6 +14,7 @@ from tqdm import tqdm
 import logging
 import yaml
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Add the current directory to path to import modules
 sys.path.append('.')
@@ -23,7 +24,7 @@ sys.path.append('..')
 from data.brain_3d_unified import BraTS3DUnifiedDataset
 from models.fast_ddpm_3d import FastDDPM3D
 from functions.losses import brats_4to1_loss
-from functions.denoising_3d import generalized_steps_3d
+from functions.denoising_3d import generalized_steps_3d, unified_4to1_generalized_steps_3d
 
 # Minimal training utils
 from training_utils import load_config, get_beta_schedule, get_timestep_schedule
@@ -200,7 +201,7 @@ def validate_model(model, val_loader, device, betas, t_intervals):
 
 
 def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, use_wandb):
-    """Generate sample images and log to W&B"""
+    """Generate sample images and log comprehensive visualization to W&B"""
     if not use_wandb:
         return
         
@@ -214,42 +215,143 @@ def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, u
             targets = batch['target'][:1].unsqueeze(1).to(device)
             target_idx = batch['target_idx'][0].item()
             
-            # Simple logging without generation for now - just log target and inputs
-            # Convert to numpy and create visualizations
+            modality_names = ['t1n', 't1c', 't2w', 't2f']
+            target_name = modality_names[target_idx]
+            
+            # Create input for generation - mask the target modality
+            x_available = inputs.clone()
+            x_available[:, target_idx] = 0  # Zero out the target modality
+            
+            # Generate initial noise for target modality
+            noise_shape = targets.shape
+            x_noise = torch.randn(noise_shape).to(device)
+            
+            # Get sampling sequence (use subset of t_intervals for faster sampling)
+            seq = t_intervals[::len(t_intervals)//10].tolist() if len(t_intervals) > 10 else t_intervals.tolist()
+            
+            logging.info(f"Generating {target_name} from other modalities...")
+            
+            # Generate sample using the diffusion model
+            try:
+                xs, x0_preds = unified_4to1_generalized_steps_3d(
+                    x_noise, x_available, target_idx, seq, model, betas, eta=0.0
+                )
+                generated = xs[-1]  # Final generated sample
+            except Exception as gen_error:
+                logging.warning(f"Generation failed, using noise: {str(gen_error)}")
+                generated = x_noise
+            
+            # Convert tensors to numpy for visualization
             inputs_np = inputs[0].cpu().numpy()  # Shape: (4, H, W, D)
             targets_np = targets[0, 0].cpu().numpy()  # Shape: (H, W, D)
+            generated_np = generated[0, 0].cpu().numpy()  # Shape: (H, W, D)
+            x_noise_np = x_noise[0, 0].cpu().numpy()  # Shape: (H, W, D)
             
             # Get middle slices for visualization
             mid_slice = targets_np.shape[2] // 2
             
-            # Create wandb images (2D slices)
-            modality_names = ['t1n', 't1c', 't2w', 't2f']
-            target_name = modality_names[target_idx]
+            # Create comprehensive visualization
+            fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+            fig.suptitle(f'Step {step}: Missing Modality Synthesis - {target_name.upper()}', fontsize=16, fontweight='bold')
             
-            images_to_log = {}
+            # Normalize function for better visualization
+            def normalize_for_vis(img):
+                if img.max() > img.min():
+                    return (img - img.min()) / (img.max() - img.min())
+                return img
             
-            # Log input modalities (middle slice)
+            # Top row: Input modalities
             for i, mod_name in enumerate(modality_names):
-                if i != target_idx:  # Don't log the target modality from input
-                    img_slice = inputs_np[i, :, :, mid_slice]
-                    # Normalize for visualization
-                    if img_slice.max() > img_slice.min():
-                        img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min())
-                    images_to_log[f"input/{mod_name}"] = wandb.Image(img_slice, caption=f"Input {mod_name}")
+                ax = axes[0, i]
+                if i == target_idx:
+                    # Show the noisy input for the target modality
+                    img = normalize_for_vis(x_noise_np[:, :, mid_slice])
+                    ax.imshow(img, cmap='gray')
+                    ax.set_title(f'{mod_name.upper()}\n(Noise Input)', fontweight='bold', color='red')
+                else:
+                    # Show available input modalities
+                    img = normalize_for_vis(inputs_np[i, :, :, mid_slice])
+                    ax.imshow(img, cmap='gray')
+                    ax.set_title(f'{mod_name.upper()}\n(Available)', fontweight='bold', color='green')
+                ax.axis('off')
             
-            # Log target
-            target_slice = targets_np[:, :, mid_slice]
-            if target_slice.max() > target_slice.min():
-                target_slice = (target_slice - target_slice.min()) / (target_slice.max() - target_slice.min())
-            images_to_log[f"target/{target_name}"] = wandb.Image(target_slice, caption=f"Target {target_name}")
+            # Bottom row: Generated, Ground Truth, and comparison
+            # Generated result
+            axes[1, 0].imshow(normalize_for_vis(generated_np[:, :, mid_slice]), cmap='gray')
+            axes[1, 0].set_title('Generated\n(Output)', fontweight='bold', color='blue')
+            axes[1, 0].axis('off')
             
-            # Log all images
-            wandb.log(images_to_log, step=step)
+            # Ground truth
+            axes[1, 1].imshow(normalize_for_vis(targets_np[:, :, mid_slice]), cmap='gray')
+            axes[1, 1].set_title('Ground Truth\n(Target)', fontweight='bold', color='orange')
+            axes[1, 1].axis('off')
             
-            logging.info(f"Sample images logged to W&B at step {step}")
+            # Difference map
+            diff = np.abs(generated_np[:, :, mid_slice] - targets_np[:, :, mid_slice])
+            diff_norm = normalize_for_vis(diff)
+            im_diff = axes[1, 2].imshow(diff_norm, cmap='hot')
+            axes[1, 2].set_title('Absolute Difference\n(|Gen - GT|)', fontweight='bold', color='purple')
+            axes[1, 2].axis('off')
+            plt.colorbar(im_diff, ax=axes[1, 2], fraction=0.046, pad=0.04)
+            
+            # Statistics
+            mse = np.mean((generated_np - targets_np) ** 2)
+            mae = np.mean(np.abs(generated_np - targets_np))
+            ssim_slice = np.corrcoef(generated_np[:, :, mid_slice].flatten(), 
+                                   targets_np[:, :, mid_slice].flatten())[0, 1]
+            if np.isnan(ssim_slice):
+                ssim_slice = 0.0
+                
+            stats_text = f'Metrics (3D Volume):\nMSE: {mse:.4f}\nMAE: {mae:.4f}\nCorr: {ssim_slice:.3f}'
+            axes[1, 3].text(0.1, 0.5, stats_text, transform=axes[1, 3].transAxes, 
+                           fontsize=12, verticalalignment='center',
+                           bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue"))
+            axes[1, 3].set_title('Quality Metrics', fontweight='bold')
+            axes[1, 3].axis('off')
+            
+            plt.tight_layout()
+            
+            # Log to W&B
+            wandb.log({
+                f"samples/comprehensive_view": wandb.Image(fig, caption=f"Comprehensive view at step {step}"),
+                f"metrics/mse": mse,
+                f"metrics/mae": mae, 
+                f"metrics/correlation": ssim_slice,
+                f"sample_info/target_modality": target_name,
+                f"sample_info/slice": mid_slice
+            }, step=step)
+            
+            plt.close(fig)
+            
+            # Also log individual images for detailed analysis
+            images_dict = {}
+            
+            # Input modalities
+            for i, mod_name in enumerate(modality_names):
+                if i != target_idx:
+                    img_slice = normalize_for_vis(inputs_np[i, :, :, mid_slice])
+                    images_dict[f"inputs/{mod_name}"] = wandb.Image(img_slice, caption=f"Input {mod_name}")
+            
+            # Key results
+            images_dict.update({
+                f"results/noise_input": wandb.Image(normalize_for_vis(x_noise_np[:, :, mid_slice]), 
+                                                   caption=f"Noise input for {target_name}"),
+                f"results/generated": wandb.Image(normalize_for_vis(generated_np[:, :, mid_slice]), 
+                                                 caption=f"Generated {target_name}"),
+                f"results/ground_truth": wandb.Image(normalize_for_vis(targets_np[:, :, mid_slice]), 
+                                                    caption=f"Ground truth {target_name}"),
+                f"results/difference": wandb.Image(diff_norm, caption="Absolute difference map")
+            })
+            
+            wandb.log(images_dict, step=step)
+            
+            logging.info(f"Comprehensive sample visualization logged to W&B at step {step}")
+            logging.info(f"Generated {target_name}: MSE={mse:.4f}, MAE={mae:.4f}, Corr={ssim_slice:.3f}")
             
     except Exception as e:
         logging.warning(f"Failed to generate and log sample images: {str(e)}")
+        import traceback
+        logging.warning(f"Traceback: {traceback.format_exc()}")
     finally:
         model.train()
 
