@@ -67,7 +67,6 @@ spec:
           
           echo "Checking W&B configuration..."
           python -c "import wandb; print(f'W&B version: {wandb.__version__}')"
-          python test_loss.py
           echo "Starting training with W&B logging..."
           PYTHONUNBUFFERED=1 python scripts/train_3d.py \
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
