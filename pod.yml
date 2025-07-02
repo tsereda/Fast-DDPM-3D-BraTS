@@ -19,7 +19,7 @@ spec:
         - name: PYTHONPATH
           value: /app/Fast-DDPM-3D-BraTS
         - name: CUDA_VISIBLE_DEVICES
-          value: "0,1,2,3"
+          value: "0,1"
         # nnUNet paths
         - name: nnUNet_raw
           value: /app/nnunet/raw
@@ -96,11 +96,11 @@ spec:
         requests:
           memory: 24Gi                # Increased for multi-GPU
           cpu: "12"                   # Increased for multi-GPU
-          nvidia.com/gpu: "4"         # Request 2 GPUs (adjust as needed)
+          nvidia.com/gpu: "2"         # Request 2 GPUs (adjust as needed)
         limits:
           memory: 32Gi
           cpu: "16"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"
   
   volumes:
     - name: workspace
