@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """
 Main training script for 3D Fast-DDPM on BraTS data
+
+IMPORTANT: GradScaler State Management
+=========================================
+When using PyTorch's automatic mixed precision (AMP) with GradScaler, it's crucial to maintain
+proper scaler state management. The scaler has an internal state that tracks whether unscale_() 
+has been called. If unscale_() is called but step() and update() are not called afterwards,
+the scaler remains in an "unscaled" state, and calling unscale_() again will raise an error:
+"unscale_() has already been called on this optimizer since the last update()".
+
+This script handles this by ensuring that whenever we call scaler.unscale_(optimizer), we
+always follow it with scaler.step(optimizer) and scaler.update(), even in error conditions
+or when skipping gradient steps due to unhealthy gradients.
 """
 
 import os
@@ -428,7 +440,11 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     if torch.isnan(grad_norm) or grad_norm > 5.0:
                         if is_main_process(rank):
                             logging.warning(f"Unhealthy gradients (norm={grad_norm}), skipping step")
+                        # IMPORTANT: Must call scaler.step() and scaler.update() even when skipping
+                        # to reset the scaler's internal state after unscale_() was called
                         optimizer.zero_grad()
+                        scaler.step(optimizer)  # This will be a no-op since gradients are zero
+                        scaler.update()  # This resets the scaler state
                         accumulated_loss = 0.0
                         accumulation_steps = 0
                         continue
@@ -532,8 +548,14 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 if "out of memory" in str(e).lower():
                     logging.error(f"OOM error in batch {batch_idx}: {e}")
                     memory_manager.cleanup_gpu_memory(force=True)
-                    # Reset optimizer and accumulation state
+                    # Reset optimizer and accumulation state, and handle scaler state
                     optimizer.zero_grad()
+                    # If scaler was unscaled, we need to complete the cycle
+                    try:
+                        scaler.step(optimizer)  # This will be a no-op since gradients are zero
+                        scaler.update()  # This resets the scaler state
+                    except:
+                        pass  # If scaler wasn't unscaled, this will fail harmlessly
                     accumulated_loss = 0.0
                     accumulation_steps = 0
                     continue
@@ -541,8 +563,14 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     logging.error(f"Error in training step: {e}")
                     if args.debug:
                         raise
-                    # Reset optimizer and accumulation state
+                    # Reset optimizer and accumulation state, and handle scaler state
                     optimizer.zero_grad()
+                    # If scaler was unscaled, we need to complete the cycle
+                    try:
+                        scaler.step(optimizer)  # This will be a no-op since gradients are zero
+                        scaler.update()  # This resets the scaler state
+                    except:
+                        pass  # If scaler wasn't unscaled, this will fail harmlessly
                     accumulated_loss = 0.0
                     accumulation_steps = 0
                     continue

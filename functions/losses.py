@@ -425,7 +425,10 @@ def safe_optimization_step(loss, optimizer, scaler, model, max_grad_norm=1.0):
     # Check gradient health
     if torch.isnan(grad_norm) or grad_norm > 5.0:
         logger.warning(f"Unhealthy gradients (norm={grad_norm}), skipping step")
+        # IMPORTANT: Must complete the scaler cycle even when skipping
         optimizer.zero_grad()
+        scaler.step(optimizer)  # This will be a no-op since gradients are zero
+        scaler.update()  # This resets the scaler state
         return False
     
     # Safe optimizer step
