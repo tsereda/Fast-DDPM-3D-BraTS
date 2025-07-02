@@ -3,7 +3,7 @@
 
 data:
     dataset: "BraTS3D"
-    volume_size: [128, 128, 128]  # Conservative for memory
+    volume_size: [64, 64, 64]  # Conservative for memory
     channels: 1               # Output channels (target modality)
     num_workers: 4
 
