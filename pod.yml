@@ -75,6 +75,7 @@ spec:
           PYTHONUNBUFFERED=1 python train_multi_gpu.py \
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
             --gpus auto \
+            --use_ddp \
             --use_wandb \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
