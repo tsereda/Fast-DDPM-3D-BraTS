@@ -139,8 +139,21 @@ class ResnetBlock3D(nn.Module):
         return x + h
 
 
+import os
+import torch
+from torch.utils.data import Dataset
+import nibabel as nib
+import numpy as np
+from pathlib import Path
+import random
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class FastDDPM3D(nn.Module):
-    """3D Fast-DDPM for unified 4->4 BraTS modality synthesis"""
+    """3D Fast-DDPM for unified 4->1 BraTS modality synthesis"""
+    
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -150,7 +163,7 @@ class FastDDPM3D(nn.Module):
         num_res_blocks = config.model.num_res_blocks
         dropout = config.model.dropout
         in_channels = config.model.in_channels
-        resolution = config.data.volume_size[0]
+        resolution = config.data.crop_size[0]  # Updated to use crop_size
         resamp_with_conv = config.model.resamp_with_conv
         
         # Always use fixed variance for 3D
@@ -245,7 +258,7 @@ class FastDDPM3D(nn.Module):
         self.conv_out = nn.Conv3d(block_in, self.out_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x, t):
-        # x shape: [B, 4, H, W, D] for unified 4->4 input
+        # x shape: [B, 4, H, W, D] for unified 4->1 input
         assert x.shape[1] == self.in_channels
         
         # Timestep embedding
@@ -276,9 +289,13 @@ class FastDDPM3D(nn.Module):
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
-        # Output
+        # Output with professor's recommended sigmoid activation
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
+        
+        # 🔥 CRITICAL FIX: Add sigmoid activation for [0,1] output
+        if getattr(self.config.model, 'use_sigmoid', True):
+            h = torch.sigmoid(h)
         
         return h
