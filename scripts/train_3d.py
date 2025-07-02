@@ -11,30 +11,244 @@ from tqdm import tqdm
 import logging
 import numpy as np
 import time
+import gc
 
 # Add the current directory to path to import modules
 sys.path.append('.')
 sys.path.append('..')
 
-# Import wandb - will be None if not installed
+# Import project modules
+try:
+    from data.brain_3d_unified import BraTS3DUnifiedDataset
+    from models.fast_ddpm_3d import FastDDPM3D
+    from functions.losses import unified_4to1_loss
+except ImportError as e:
+    logging.error(f"Failed to import modules: {e}")
+    sys.exit(1)
+
+# Optional wandb import
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
-    wandb = None
     WANDB_AVAILABLE = False
 
-# Import required modules
-try:
-    from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import unified_4to1_loss, calculate_psnr
-    from functions.denoising_3d import unified_4to1_generalized_steps_3d
-    from data.brain_3d_unified import BraTS3DUnifiedDataset
-    print("✓ Successfully imported 3D components")
-except ImportError as e:
-    print(f"✗ Import error: {e}")
-    print("Make sure you're running from the project root directory")
-    sys.exit(1)
+
+# Memory Management Utilities for 3D Medical Imaging
+class MemoryManager:
+    """Enhanced memory management for 3D diffusion training"""
+    
+    def __init__(self, device, aggressive_cleanup=True):
+        self.device = device
+        self.aggressive_cleanup = aggressive_cleanup
+        self.peak_memory = 0
+        self.cleanup_counter = 0
+        self.memory_threshold_gb = 10.0  # Configurable threshold
+        self.last_cleanup_time = time.time()
+        
+    def cleanup_gpu_memory(self, force=False):
+        """Comprehensive GPU memory cleanup"""
+        if not torch.cuda.is_available():
+            return
+            
+        try:
+            # Standard cleanup
+            torch.cuda.empty_cache()
+            
+            if force or self.aggressive_cleanup:
+                # More aggressive cleanup
+                if hasattr(torch.cuda, 'ipc_collect'):
+                    torch.cuda.ipc_collect()
+                
+                # Force garbage collection
+                gc.collect()
+                
+                # Clear any lingering autograd history
+                torch.cuda.synchronize()
+                
+            self.cleanup_counter += 1
+            self.last_cleanup_time = time.time()
+            
+        except Exception as e:
+            logging.warning(f"GPU memory cleanup failed: {e}")
+    
+    def get_memory_stats(self):
+        """Get detailed memory statistics"""
+        if not torch.cuda.is_available():
+            return {}
+            
+        try:
+            allocated = torch.cuda.memory_allocated(self.device) / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved(self.device) / 1024**3   # GB
+            max_allocated = torch.cuda.max_memory_allocated(self.device) / 1024**3  # GB
+            
+            self.peak_memory = max(self.peak_memory, allocated)
+            
+            return {
+                'allocated_gb': allocated,
+                'reserved_gb': reserved,
+                'max_allocated_gb': max_allocated,
+                'peak_session_gb': self.peak_memory,
+                'cleanup_calls': self.cleanup_counter
+            }
+        except Exception as e:
+            logging.warning(f"Memory stats failed: {e}")
+            return {}
+    
+    def log_memory_usage(self, prefix=""):
+        """Log current memory usage"""
+        stats = self.get_memory_stats()
+        if stats:
+            logging.info(f"{prefix}GPU Memory - "
+                        f"Allocated: {stats['allocated_gb']:.2f}GB, "
+                        f"Reserved: {stats['reserved_gb']:.2f}GB, "
+                        f"Peak: {stats['peak_session_gb']:.2f}GB")
+    
+    def check_memory_threshold(self, threshold_gb=None):
+        """Check if memory usage exceeds threshold"""
+        if threshold_gb is None:
+            threshold_gb = self.memory_threshold_gb
+            
+        stats = self.get_memory_stats()
+        if stats and stats['allocated_gb'] > threshold_gb:
+            logging.warning(f"High memory usage: {stats['allocated_gb']:.2f}GB > {threshold_gb}GB")
+            return True
+        return False
+    
+    def adaptive_cleanup(self):
+        """Perform adaptive memory cleanup based on usage and time"""
+        current_time = time.time()
+        time_since_cleanup = current_time - self.last_cleanup_time
+        
+        # Force cleanup if memory threshold exceeded or enough time passed
+        if self.check_memory_threshold() or time_since_cleanup > 30:  # 30 seconds
+            self.cleanup_gpu_memory(force=True)
+            return True
+        return False
+
+
+def safe_batch_processing(batch, device, memory_manager, max_retries=3):
+    """
+    Safely process batch data with memory management and error recovery
+    
+    Args:
+        batch: Input batch dictionary
+        device: Target device
+        memory_manager: MemoryManager instance
+        max_retries: Maximum retry attempts for OOM recovery
+        
+    Returns:
+        Processed batch dict or None if processing fails
+    """
+    for attempt in range(max_retries):
+        try:
+            # Check memory before processing
+            if memory_manager.check_memory_threshold():
+                memory_manager.cleanup_gpu_memory(force=True)
+            
+            # Process batch tensors
+            processed_batch = {}
+            
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    # Move to device with non_blocking for efficiency
+                    processed_batch[key] = value.to(device, non_blocking=True)
+                    
+                    # Validate tensor after transfer
+                    if torch.any(torch.isnan(processed_batch[key])) or torch.any(torch.isinf(processed_batch[key])):
+                        logging.warning(f"NaN/Inf detected in batch tensor '{key}' - skipping batch")
+                        return None
+                        
+                else:
+                    processed_batch[key] = value
+            
+            # Final memory check after processing
+            if memory_manager.check_memory_threshold(threshold_gb=12.0):  # Higher threshold after processing
+                logging.warning("Memory usage high after batch processing")
+                memory_manager.cleanup_gpu_memory()
+            
+            return processed_batch
+            
+        except torch.cuda.OutOfMemoryError as e:
+            logging.error(f"OOM error in batch processing (attempt {attempt + 1}/{max_retries}): {e}")
+            
+            # Aggressive cleanup on OOM
+            memory_manager.cleanup_gpu_memory(force=True)
+            
+            if attempt == max_retries - 1:
+                logging.error("Failed to process batch after maximum retries")
+                return None
+                
+            # Wait a bit before retry
+            time.sleep(1)
+            
+        except Exception as e:
+            logging.error(f"Error in batch processing: {e}")
+            return None
+    
+    return None
+
+
+def optimize_model_for_memory(model, enable_gradient_checkpointing=True):
+    """
+    Apply memory optimizations to the model
+    
+    Args:
+        model: PyTorch model
+        enable_gradient_checkpointing: Whether to enable gradient checkpointing
+    """
+    try:
+        # Enable gradient checkpointing if supported
+        if enable_gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
+            model.gradient_checkpointing_enable()
+            logging.info("Enabled gradient checkpointing")
+        
+        # Set model to use memory efficient attention if available
+        if hasattr(model, 'set_attention_slice'):
+            model.set_attention_slice("auto")
+            logging.info("Enabled memory efficient attention")
+            
+        # Enable memory efficient cross attention
+        if hasattr(model, 'enable_xformers_memory_efficient_attention'):
+            try:
+                model.enable_xformers_memory_efficient_attention()
+                logging.info("Enabled xformers memory efficient attention")
+            except Exception as e:
+                logging.warning(f"Could not enable xformers attention: {e}")
+                
+    except Exception as e:
+        logging.warning(f"Model memory optimization failed: {e}")
+
+
+def dynamic_batch_size_adjustment(current_batch_size, memory_stats, target_memory_gb=8.0):
+    """
+    Dynamically adjust batch size based on memory usage
+    
+    Args:
+        current_batch_size: Current batch size
+        memory_stats: Memory statistics dict
+        target_memory_gb: Target memory usage in GB
+        
+    Returns:
+        Adjusted batch size
+    """
+    if not memory_stats:
+        return current_batch_size
+    
+    current_memory = memory_stats.get('allocated_gb', 0)
+    
+    if current_memory > target_memory_gb * 1.2:  # 20% over target
+        # Reduce batch size
+        new_batch_size = max(1, current_batch_size // 2)
+        logging.info(f"Reducing batch size from {current_batch_size} to {new_batch_size} due to high memory usage")
+        return new_batch_size
+    elif current_memory < target_memory_gb * 0.6:  # 40% under target
+        # Increase batch size
+        new_batch_size = min(current_batch_size * 2, 8)  # Cap at reasonable size
+        logging.info(f"Increasing batch size from {current_batch_size} to {new_batch_size}")
+        return new_batch_size
+    
+    return current_batch_size
 
 
 def parse_args():
@@ -534,9 +748,25 @@ def main():
     global_step = start_step  # This tracks actual optimizer steps
     best_val_loss = float('inf')
     
+    memory_manager = MemoryManager(device)
+    
+    # Apply model optimizations for memory efficiency
+    optimize_model_for_memory(model, enable_gradient_checkpointing=True)
+    
+    # Log initial memory state
+    memory_manager.log_memory_usage("Initial: ")
+    
+    # Track dynamic batch size adjustment
+    current_effective_batch = effective_batch_size
+    batch_size_adjustments = 0
+    
     for epoch in range(start_epoch, config.training.epochs):
         model.train()
         epoch_loss = 0.0
+        
+        # Adaptive memory cleanup at start of epoch
+        memory_manager.adaptive_cleanup()
+        memory_manager.log_memory_usage(f"Epoch {epoch+1} start: ")
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{config.training.epochs}')
         
@@ -548,15 +778,25 @@ def main():
             try:
                 step_start_time = time.time()
                 
+                # Periodic memory management
+                if batch_idx % 10 == 0:
+                    memory_manager.adaptive_cleanup()
+                
                 # Zero gradients at the start of each accumulation cycle
                 if accumulation_steps == 0:
                     optimizer.zero_grad()
                 
-                inputs = batch['input'].to(device)
-                targets = batch['target'].to(device).unsqueeze(1)
-                target_idx = batch['target_idx'][0].item()
+                # Safe batch processing with enhanced memory management
+                inputs = safe_batch_processing(batch, device, memory_manager)
+                if inputs is None:
+                    # Skip this batch if processing failed
+                    logging.warning(f"Skipping batch {batch_idx} due to processing failure")
+                    continue
                 
-                n = inputs.size(0)
+                targets = inputs['target'].unsqueeze(1)
+                target_idx = inputs['target_idx'][0].item()
+                
+                n = inputs['input'].size(0)
                 
                 # Fast-DDPM antithetic sampling
                 idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
@@ -566,15 +806,20 @@ def main():
                 
                 e = torch.randn_like(targets)
                 
+                # Enhanced loss computation with memory management
                 with autocast():
-                    loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
-                    # Don't scale loss here - let gradient accumulation handle it naturally
+                    loss = unified_4to1_loss(model, inputs['input'], targets, t, e, b=betas, target_idx=target_idx)
                 
-                # Check for NaN/Inf loss
+                # Enhanced loss validation
                 if torch.isnan(loss) or torch.isinf(loss):
                     logging.error(f"Invalid loss detected: {loss.item()}")
-                    logging.error(f"Input stats: min={inputs.min():.3f}, max={inputs.max():.3f}")
+                    logging.error(f"Input stats: min={inputs['input'].min():.3f}, max={inputs['input'].max():.3f}")
                     logging.error(f"Target stats: min={targets.min():.3f}, max={targets.max():.3f}")
+                    
+                    # Clear problematic tensors
+                    del inputs, targets, e, loss
+                    memory_manager.cleanup_gpu_memory(force=True)
+                    
                     if args.debug:
                         raise ValueError("NaN/Inf loss - stopping training")
                     continue  # Skip this batch
@@ -592,6 +837,9 @@ def main():
                 accumulated_loss += loss.item()  # Accumulate the original (unscaled) loss for logging
                 accumulation_steps += 1
                 
+                # Clear intermediate tensors to save memory
+                del inputs, targets, e, loss, scaled_loss
+                
                 # Step optimizer when we've accumulated enough gradients
                 if accumulation_steps >= gradient_accumulation_steps:
                     scaler.unscale_(optimizer)
@@ -607,9 +855,6 @@ def main():
                     if global_step % 100 == 0:  # Check every 100 steps
                         monitor_scaler_health(scaler, global_step)
                     
-                    # Move scheduler step here to avoid the warning
-                    # scheduler.step()  # Comment out - we'll do this at end of epoch instead
-                    
                     # Now we've completed one effective training step
                     global_step += 1
                     
@@ -619,11 +864,16 @@ def main():
                     
                     step_time = time.time() - step_start_time
                     
+                    # Enhanced progress bar with memory info
+                    memory_stats = memory_manager.get_memory_stats()
+                    memory_gb = memory_stats.get('allocated_gb', 0) if memory_stats else 0
+                    
                     pbar.set_postfix({
                         'loss': f'{average_loss:.6f}',
                         'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
                         'target': f'{target_idx}',
                         'step': global_step,
+                        'mem_gb': f'{memory_gb:.1f}',
                         'step_time': f'{step_time:.2f}s'
                     })
                     
@@ -708,15 +958,40 @@ def main():
                                 global_step
                             )
                 
-                # Clear GPU memory cache periodically
-                if (batch_idx + 1) % 10 == 0:
-                    torch.cuda.empty_cache()
+                # Enhanced periodic memory cleanup
+                if (batch_idx + 1) % 5 == 0:  # More frequent cleanup
+                    memory_manager.adaptive_cleanup()
             
+            except torch.cuda.OutOfMemoryError as e:
+                logging.error(f"GPU OOM error in batch {batch_idx}: {e}")
+                
+                # Aggressive memory cleanup
+                memory_manager.cleanup_gpu_memory(force=True)
+                
+                # Reset accumulation if OOM occurred
+                accumulated_loss = 0.0
+                accumulation_steps = 0
+                
+                # Log memory stats for debugging
+                memory_manager.log_memory_usage("After OOM cleanup: ")
+                
+                # Optionally reduce effective batch size
+                if batch_size_adjustments < 3:  # Limit adjustments
+                    memory_stats = memory_manager.get_memory_stats()
+                    new_batch_size = dynamic_batch_size_adjustment(
+                        current_effective_batch, memory_stats, target_memory_gb=6.0
+                    )
+                    if new_batch_size != current_effective_batch:
+                        current_effective_batch = new_batch_size
+                        batch_size_adjustments += 1
+                        logging.info(f"Adjusted effective batch size to {new_batch_size}")
+                
+                continue
+                
             except RuntimeError as e:
-                if "out of memory" in str(e):
-                    logging.error("GPU OOM - clearing cache and skipping batch")
-                    torch.cuda.empty_cache()
-                    # Reset accumulation if OOM occurred
+                if "out of memory" in str(e).lower():
+                    logging.error(f"Runtime OOM error: {e}")
+                    memory_manager.cleanup_gpu_memory(force=True)
                     accumulated_loss = 0.0
                     accumulation_steps = 0
                     continue
@@ -724,24 +999,63 @@ def main():
                     logging.error(f"Runtime error in training step: {e}")
                     if args.debug:
                         raise
+                    # Clear any accumulated gradients and continue
+                    optimizer.zero_grad()
                     continue
+                    
+            except ValueError as e:
+                if "nan" in str(e).lower() or "inf" in str(e).lower():
+                    logging.error(f"Numerical stability error: {e}")
+                    # Clear gradients and continue
+                    optimizer.zero_grad()
+                    accumulated_loss = 0.0
+                    accumulation_steps = 0
+                    continue
+                else:
+                    logging.error(f"Value error in training step: {e}")
+                    if args.debug:
+                        raise
+                    continue
+                    
             except Exception as e:
-                logging.error(f"Error in training step: {e}")
+                logging.error(f"Unexpected error in training step: {e}")
+                # Log detailed error info
+                import traceback
+                logging.error(f"Traceback: {traceback.format_exc()}")
+                
+                # Try to recover
+                try:
+                    optimizer.zero_grad()
+                    memory_manager.cleanup_gpu_memory(force=True)
+                except:
+                    pass
+                
                 if args.debug:
                     raise
                 continue
         
-        # End of epoch
+        # End of epoch processing with memory management
         scheduler.step()
+        
+        # Log epoch summary with memory stats
         avg_loss = epoch_loss / max(1, global_step - start_step) if global_step > start_step else 0
-        logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
+        memory_manager.log_memory_usage(f"Epoch {epoch+1} end: ")
+        
+        logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f}, '
+                    f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
+                    f'Batch adjustments: {batch_size_adjustments}')
         
         if use_wandb:
             wandb.log({
                 'epoch/avg_loss': avg_loss,
                 'epoch/learning_rate': optimizer.param_groups[0]["lr"],
                 'epoch/epoch': epoch + 1,
+                'system/batch_size_adjustments': batch_size_adjustments,
+                'system/peak_memory_gb': memory_manager.peak_memory,
             }, step=global_step)
+        
+        # Comprehensive memory cleanup at end of epoch
+        memory_manager.cleanup_gpu_memory(force=True)
         
         # Only save checkpoint at end of epoch if it's a multiple of 10 epochs (much less frequent)
         if (epoch + 1) % 10 == 0:
