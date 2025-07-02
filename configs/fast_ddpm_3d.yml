@@ -28,15 +28,18 @@ diffusion:
     num_diffusion_timesteps: 1000
 
 training:
-    # Loss function: Now using stable_4to1_loss for better numerical stability
-    # This replaces the previous streamlined_4to1_loss with simplified 30-line implementation
-    loss_type: "stable"             # Options: stable, streamlined, enhanced, simple
+    # Loss function: Using ultra_stable for problematic early training
+    loss_type: "ultra_stable"       # Options: ultra_stable, stable, streamlined, enhanced, simple
     batch_size: 1                  # Small for 3D memory constraints (per GPU)
     gradient_accumulation_steps: 2   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.00005          # Conservative for stability
+    learning_rate: 0.00001          # Reduced for better stability
     weight_decay: 0.0
-    gradient_clip: 1.0              # Maximum gradient norm for clipping (improved safety)
+    gradient_clip: 10.0             # Increased threshold for diffusion models
+    
+    # Learning rate scheduling
+    warmup_steps: 1000              # Warmup for first 1000 steps
+    warmup_start_lr: 0.000001       # Start with very low LR
     
     # Multi-GPU settings
     multi_gpu: true                 # Enable multi-GPU training

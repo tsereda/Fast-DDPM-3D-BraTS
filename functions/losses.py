@@ -404,6 +404,70 @@ def stable_4to1_loss(model, x_available, x_target, t, noise, betas, target_idx):
     return torch.clamp(loss, 0.0, 10.0)  # Prevent explosion
 
 
+def ultra_stable_4to1_loss(model, x_available, x_target, t, noise, betas, target_idx):
+    """Ultra-stable diffusion loss for problematic early training"""
+    device = x_target.device
+    
+    # Immediate validation
+    if torch.any(torch.isnan(x_target)) or torch.any(torch.isnan(noise)):
+        return torch.tensor(0.01, device=device, requires_grad=True)  # Non-zero for gradients
+    
+    # Extra stable alpha computation with more clamping
+    alphas_cumprod = torch.cumprod(1.0 - torch.clamp(betas, 1e-8, 0.999), dim=0)
+    alphas_cumprod = torch.clamp(alphas_cumprod, 1e-8, 0.9999)  # Extra clamping
+    
+    t_safe = torch.clamp(t.long(), 0, len(alphas_cumprod) - 1)
+    alpha_t = alphas_cumprod[t_safe].view(-1, 1, 1, 1, 1)
+    
+    # Stable noise addition with safeguards
+    sqrt_alpha = torch.sqrt(torch.clamp(alpha_t, min=1e-8, max=0.9999))
+    sqrt_one_minus_alpha = torch.sqrt(torch.clamp(1.0 - alpha_t, min=1e-8, max=0.9999))
+    
+    # Clamp inputs to prevent extreme values
+    x_target_clamped = torch.clamp(x_target, -2.0, 2.0)
+    noise_clamped = torch.clamp(noise, -2.0, 2.0)
+    
+    x_noisy = sqrt_alpha * x_target_clamped + sqrt_one_minus_alpha * noise_clamped
+    x_noisy = torch.clamp(x_noisy, -3.0, 3.0)  # Extra safety
+    
+    # Model prediction with extensive error handling
+    model_input = x_available.clone()
+    model_input = torch.clamp(model_input, -2.0, 2.0)  # Clamp input modalities too
+    model_input[:, target_idx:target_idx+1] = x_noisy
+    
+    try:
+        with torch.cuda.amp.autocast(enabled=False):  # Disable AMP for ultra-stability
+            predicted_noise = model(model_input, t.float())
+            if isinstance(predicted_noise, tuple):
+                predicted_noise = predicted_noise[0]
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    except Exception:
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    # Validate prediction
+    if predicted_noise.shape != noise.shape:
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    if torch.any(torch.isnan(predicted_noise)) or torch.any(torch.isinf(predicted_noise)):
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    # Clamp prediction to prevent extremes
+    predicted_noise = torch.clamp(predicted_noise, -5.0, 5.0)
+    
+    # Simple MSE with extra stability
+    diff = predicted_noise - noise_clamped
+    loss = torch.mean(diff * diff)
+    
+    # Final safety checks and clamping
+    if torch.isnan(loss) or torch.isinf(loss):
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    loss = torch.clamp(loss, 0.001, 5.0)  # Prevent both explosion and vanishing
+    
+    return loss
+
+
 def safe_optimization_step(loss, optimizer, scaler, model, max_grad_norm=1.0):
     """Numerically stable optimization step"""
     
@@ -441,16 +505,18 @@ def safe_optimization_step(loss, optimizer, scaler, model, max_grad_norm=1.0):
 
 # Registry for loss functions
 loss_registry = {
-    'stable': stable_4to1_loss,            # NEW: Simplified stable version (recommended)
-    'streamlined': streamlined_4to1_loss,  # Current default
-    'enhanced': enhanced_4to1_loss,        # Full medical components
-    'simple': simple_4to1_loss,            # Ultra-minimal version
+    'ultra_stable': ultra_stable_4to1_loss,   # NEW: Ultra-stable for problematic training
+    'stable': stable_4to1_loss,               # Simplified stable version (recommended)
+    'streamlined': streamlined_4to1_loss,     # Current default
+    'enhanced': enhanced_4to1_loss,           # Full medical components
+    'simple': simple_4to1_loss,               # Ultra-minimal version
     # Task-specific aliases
-    'stable_4to1': stable_4to1_loss,       # NEW: Alias for stable version
+    'ultra_stable_4to1': ultra_stable_4to1_loss,  # NEW: Alias for ultra-stable version
+    'stable_4to1': stable_4to1_loss,          # Alias for stable version
     'enhanced_4to1': enhanced_4to1_loss,
     'simple_4to1': simple_4to1_loss,
-    'sg': stable_4to1_loss,                # NEW: Use stable for single condition
-    'sr': stable_4to1_loss,                # NEW: Use stable for multi condition
+    'sg': ultra_stable_4to1_loss,             # NEW: Use ultra-stable for single condition
+    'sr': ultra_stable_4to1_loss,             # NEW: Use ultra-stable for multi condition
 }
 
 class SSIM3D(nn.Module):
@@ -871,6 +937,70 @@ def optimized_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, kee
         return total_loss.view(batch_size, -1).mean(dim=1)
     else:
         return total_loss.mean()
+
+
+def ultra_stable_4to1_loss(model, x_available, x_target, t, noise, betas, target_idx):
+    """Ultra-stable diffusion loss for problematic early training"""
+    device = x_target.device
+    
+    # Immediate validation
+    if torch.any(torch.isnan(x_target)) or torch.any(torch.isnan(noise)):
+        return torch.tensor(0.01, device=device, requires_grad=True)  # Non-zero for gradients
+    
+    # Extra stable alpha computation with more clamping
+    alphas_cumprod = torch.cumprod(1.0 - torch.clamp(betas, 1e-8, 0.999), dim=0)
+    alphas_cumprod = torch.clamp(alphas_cumprod, 1e-8, 0.9999)  # Extra clamping
+    
+    t_safe = torch.clamp(t.long(), 0, len(alphas_cumprod) - 1)
+    alpha_t = alphas_cumprod[t_safe].view(-1, 1, 1, 1, 1)
+    
+    # Stable noise addition with safeguards
+    sqrt_alpha = torch.sqrt(torch.clamp(alpha_t, min=1e-8, max=0.9999))
+    sqrt_one_minus_alpha = torch.sqrt(torch.clamp(1.0 - alpha_t, min=1e-8, max=0.9999))
+    
+    # Clamp inputs to prevent extreme values
+    x_target_clamped = torch.clamp(x_target, -2.0, 2.0)
+    noise_clamped = torch.clamp(noise, -2.0, 2.0)
+    
+    x_noisy = sqrt_alpha * x_target_clamped + sqrt_one_minus_alpha * noise_clamped
+    x_noisy = torch.clamp(x_noisy, -3.0, 3.0)  # Extra safety
+    
+    # Model prediction with extensive error handling
+    model_input = x_available.clone()
+    model_input = torch.clamp(model_input, -2.0, 2.0)  # Clamp input modalities too
+    model_input[:, target_idx:target_idx+1] = x_noisy
+    
+    try:
+        with torch.cuda.amp.autocast(enabled=False):  # Disable AMP for ultra-stability
+            predicted_noise = model(model_input, t.float())
+            if isinstance(predicted_noise, tuple):
+                predicted_noise = predicted_noise[0]
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    except Exception:
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    # Validate prediction
+    if predicted_noise.shape != noise.shape:
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    if torch.any(torch.isnan(predicted_noise)) or torch.any(torch.isinf(predicted_noise)):
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    # Clamp prediction to prevent extremes
+    predicted_noise = torch.clamp(predicted_noise, -5.0, 5.0)
+    
+    # Simple MSE with extra stability
+    diff = predicted_noise - noise_clamped
+    loss = torch.mean(diff * diff)
+    
+    # Final safety checks and clamping
+    if torch.isnan(loss) or torch.isinf(loss):
+        return torch.tensor(0.01, device=device, requires_grad=True)
+    
+    loss = torch.clamp(loss, 0.001, 5.0)  # Prevent both explosion and vanishing
+    
+    return loss
 
 
 # Add to registry

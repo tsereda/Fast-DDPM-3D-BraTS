@@ -18,6 +18,7 @@ or when skipping gradient steps due to unhealthy gradients.
 import os
 import sys
 import argparse
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
@@ -198,19 +199,37 @@ def setup_model_and_optimizer(config, device, rank, world_size, args):
             logging.error(f"Failed to create model: {e}")
         raise
     
-    # Optimizer and scheduler
-    optimizer = torch.optim.Adam(
+    # Optimizer with improved settings for diffusion models
+    optimizer = torch.optim.AdamW(  # Use AdamW for better weight decay
         model.parameters(), 
         lr=config.training.learning_rate,
         weight_decay=getattr(config.training, 'weight_decay', 0),
-        betas=(0.9, 0.999)
+        betas=(0.9, 0.999),
+        eps=1e-8  # Improved numerical stability
     )
     
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=config.training.epochs,
-        eta_min=config.training.learning_rate * 0.1
-    )
+    # Learning rate scheduler with warmup
+    warmup_steps = getattr(config.training, 'warmup_steps', 1000)
+    if warmup_steps > 0:
+        def lr_lambda(step):
+            if step < warmup_steps:
+                # Linear warmup
+                warmup_start_lr = getattr(config.training, 'warmup_start_lr', config.training.learning_rate * 0.1)
+                return warmup_start_lr / config.training.learning_rate + (1.0 - warmup_start_lr / config.training.learning_rate) * step / warmup_steps
+            else:
+                # Cosine annealing after warmup
+                remaining_steps = step - warmup_steps
+                total_remaining = config.training.epochs * 1000 - warmup_steps  # Approximate total steps
+                return 0.1 + 0.9 * (1 + math.cos(math.pi * remaining_steps / total_remaining)) / 2
+        
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    else:
+        # Fallback to cosine annealing without warmup
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=config.training.epochs,
+            eta_min=config.training.learning_rate * 0.1
+        )
     
     return model, optimizer, scheduler
 
@@ -431,15 +450,21 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     
                     # Safe gradient step with clipping
                     scaler.unscale_(optimizer)
+                    
+                    # Get gradient clipping threshold from config (default increased to 10.0)
+                    gradient_clip = getattr(config.training, 'gradient_clip', 10.0)
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 
-                        max_norm=getattr(config.training, 'gradient_clip', 1.0)
+                        max_norm=gradient_clip
                     )
                     
-                    # Check gradient health before stepping
-                    if torch.isnan(grad_norm) or grad_norm > 5.0:
+                    # Adaptive gradient health check (more lenient for diffusion models)
+                    # Use a higher threshold that scales with the clipping value
+                    health_threshold = min(gradient_clip * 2.0, 50.0)  # Allow gradients up to 2x clip value or 50
+                    
+                    if torch.isnan(grad_norm) or grad_norm > health_threshold:
                         if is_main_process(rank):
-                            logging.warning(f"Unhealthy gradients (norm={grad_norm}), skipping step")
+                            logging.warning(f"Unhealthy gradients (norm={grad_norm:.3f}, threshold={health_threshold:.1f}), skipping step")
                         # IMPORTANT: Must call scaler.step() and scaler.update() even when skipping
                         # to reset the scaler's internal state after unscale_() was called
                         optimizer.zero_grad()
@@ -449,10 +474,17 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                         accumulation_steps = 0
                         continue
                     
+                    # Log gradient statistics for monitoring
+                    if global_step % (args.log_every_n_steps * 5) == 0 and is_main_process(rank):
+                        logging.info(f"Gradient norm: {grad_norm:.3f} (threshold: {health_threshold:.1f})")
+                    
                     # Safe optimizer step
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
+                    
+                    # Step the learning rate scheduler (for warmup)
+                    scheduler.step()
                     
                     # Now we've completed one effective training step
                     global_step += 1
@@ -576,7 +608,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     continue
         
         # End of epoch processing
-        scheduler.step()
+        # Note: scheduler.step() is now called per optimization step for warmup
         
         # Log epoch summary
         avg_loss = epoch_loss / max(1, global_step - start_step) if global_step > start_step else 0
