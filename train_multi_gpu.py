@@ -69,7 +69,7 @@ def main():
             env['CUDA_VISIBLE_DEVICES'] = str(i)  # Each process sees only its GPU
             
             cmd = [
-                sys.executable, 'scripts/train_3d.py',
+                sys.executable, 'main_train.py',
                 '--config', args.config,
                 '--data_root', args.data_root,
                 '--exp', args.exp,
@@ -111,7 +111,7 @@ def main():
         print("Launching DataParallel/Single GPU training...")
         
         cmd = [
-            sys.executable, 'scripts/train_3d.py',
+            sys.executable, 'main_train.py',
             '--config', args.config,
             '--data_root', args.data_root,
             '--exp', args.exp,
