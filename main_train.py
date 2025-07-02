@@ -335,6 +335,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
         # Initialize accumulation variables
         accumulated_loss = 0.0
         accumulation_steps = 0
+        scaler_unscaled = False  # Track if scaler has been unscaled
         
         for batch_idx, batch in enumerate(pbar):
             try:
@@ -350,6 +351,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 # Zero gradients at the start of each accumulation cycle
                 if accumulation_steps == 0:
                     optimizer.zero_grad()
+                    scaler_unscaled = False  # Reset scaler state tracking
                 
                 # Safe batch processing with enhanced memory management
                 inputs = safe_batch_processing(batch, device, memory_manager)
@@ -402,14 +404,23 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Step optimizer when we've accumulated enough gradients
                 if accumulation_steps >= gradient_accumulation_steps:
-                    scaler.unscale_(optimizer)
+                    # Unscale gradients and apply gradient clipping (only if not already unscaled)
+                    if not scaler_unscaled:
+                        scaler.unscale_(optimizer)
+                        scaler_unscaled = True
+                    
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 
                         max_norm=getattr(config.training, 'gradient_clip', float('inf'))
                     )
                     
+                    # Step optimizer and update scaler
                     scaler.step(optimizer)
                     scaler.update()
+                    
+                    # Zero gradients for next accumulation cycle
+                    optimizer.zero_grad()
+                    scaler_unscaled = False  # Reset scaler state
                     
                     # Monitor gradient scaler health
                     if global_step % 100 == 0:  # Check every 100 steps
@@ -455,6 +466,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     # Reset accumulation variables for next cycle
                     accumulated_loss = 0.0
                     accumulation_steps = 0
+                    scaler_unscaled = False  # Reset scaler state tracking
                     
                     # Logging
                     if global_step % args.log_every_n_steps == 0 and is_main_process(rank):
@@ -511,16 +523,32 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 if "out of memory" in str(e).lower():
                     logging.error(f"OOM error in batch {batch_idx}: {e}")
                     memory_manager.cleanup_gpu_memory(force=True)
+                    # Reset optimizer and scaler state
+                    optimizer.zero_grad()
                     accumulated_loss = 0.0
                     accumulation_steps = 0
+                    scaler_unscaled = False
                     continue
                 else:
                     logging.error(f"Error in training step: {e}")
                     if args.debug:
                         raise
+                    # Reset optimizer and scaler state properly
+                    try:
+                        # If gradients were already unscaled but step failed, 
+                        # we need to step and update to reset scaler state
+                        if scaler_unscaled:
+                            # This handles the case where unscale_() was called but step() failed
+                            scaler.step(optimizer)
+                            scaler.update()
+                    except:
+                        # If that fails, just reset everything
+                        pass
+                    
                     optimizer.zero_grad()
                     accumulated_loss = 0.0
                     accumulation_steps = 0
+                    scaler_unscaled = False
                     continue
         
         # End of epoch processing
