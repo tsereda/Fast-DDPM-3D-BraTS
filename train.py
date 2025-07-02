@@ -224,8 +224,6 @@ def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, u
             # Get sampling sequence (use subset of t_intervals for faster sampling)
             seq = t_intervals[::len(t_intervals)//10].tolist() if len(t_intervals) > 10 else t_intervals.tolist()
             
-            logging.info(f"Generating {target_name} from other modalities...")
-            
             # Generate sample using the diffusion model
             try:
                 xs, x0_preds = unified_4to1_generalized_steps_3d(
@@ -289,8 +287,6 @@ def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, u
             }, step=step)
             
             plt.close(fig)
-            
-            logging.info(f"Comprehensive sample visualization logged to W&B at step {step}")
             
     except Exception as e:
         logging.warning(f"Failed to generate and log sample images: {str(e)}")
