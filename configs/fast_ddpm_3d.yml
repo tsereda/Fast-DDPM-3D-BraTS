@@ -3,7 +3,7 @@
 
 data:
     dataset: "BraTS3D"
-    volume_size: [100, 100, 100]  # Conservative for memory
+    volume_size: [100, 100, 100]  # Increased to use more of the full volume
     channels: 1               # Output channels (target modality)
     num_workers: 4
 
@@ -29,9 +29,9 @@ diffusion:
 
 training:
     batch_size: 1                  # Small for 3D memory constraints (per GPU)
-    gradient_accumulation_steps: 2   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
+    gradient_accumulation_steps: 4   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.00005          # Conservative for stability
+    learning_rate: 0.0001           # Increased for properly scaled loss
     weight_decay: 0.0
     gradient_clip: 1.0
     
