@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def validate_tensor_stability(tensor, name="tensor", max_val=10.0):
+def validate_tensor_stability(tensor, name="tensor", max_val=10.0, debug=False):
     """
     Validate tensor for numerical stability
     
