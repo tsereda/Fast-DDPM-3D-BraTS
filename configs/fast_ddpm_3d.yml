@@ -3,7 +3,7 @@
 
 data:
     dataset: "BraTS3D"
-    volume_size: [128, 128, 128]  # Increased to use more of the full volume
+    volume_size: [100, 100, 100]  # Increased to use more of the full volume
     channels: 1               # Output channels (target modality)
     num_workers: 4
 
