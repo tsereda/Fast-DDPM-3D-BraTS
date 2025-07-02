@@ -24,7 +24,7 @@ sys.path.append('..')
 try:
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import unified_4to1_loss
+    from functions.losses import streamlined_4to1_loss
 except ImportError as e:
     logging.error(f"Failed to import modules: {e}")
     sys.exit(1)
@@ -374,7 +374,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Enhanced loss computation with memory management
                 with autocast():
-                    loss = unified_4to1_loss(model, inputs['input'], targets, t, e, b=betas, target_idx=target_idx)
+                    loss = streamlined_4to1_loss(model, inputs['input'], targets, t, e, b=betas, target_idx=target_idx)
                 
                 # Enhanced loss validation
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -402,14 +402,21 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Step optimizer when we've accumulated enough gradients
                 if accumulation_steps >= gradient_accumulation_steps:
+                    # Unscale gradients for gradient clipping
                     scaler.unscale_(optimizer)
+                    
+                    # Apply gradient clipping
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 
                         max_norm=getattr(config.training, 'gradient_clip', float('inf'))
                     )
                     
+                    # Step optimizer and update scaler
                     scaler.step(optimizer)
                     scaler.update()
+                    
+                    # Zero gradients for next accumulation cycle
+                    optimizer.zero_grad()
                     
                     # Monitor gradient scaler health
                     if global_step % 100 == 0:  # Check every 100 steps
@@ -511,6 +518,8 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 if "out of memory" in str(e).lower():
                     logging.error(f"OOM error in batch {batch_idx}: {e}")
                     memory_manager.cleanup_gpu_memory(force=True)
+                    # Reset optimizer and accumulation state
+                    optimizer.zero_grad()
                     accumulated_loss = 0.0
                     accumulation_steps = 0
                     continue
@@ -518,6 +527,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     logging.error(f"Error in training step: {e}")
                     if args.debug:
                         raise
+                    # Reset optimizer and accumulation state
                     optimizer.zero_grad()
                     accumulated_loss = 0.0
                     accumulation_steps = 0

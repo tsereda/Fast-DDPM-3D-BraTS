@@ -119,7 +119,7 @@ def load_checkpoint(path, model, optimizer, scaler, device):
 
 def validate_model(model, val_loader, device, betas, t_intervals):
     """Validation loop"""
-    from functions.losses import unified_4to1_loss
+    from functions.losses import streamlined_4to1_loss
     
     model.eval()
     total_loss = 0
@@ -137,7 +137,7 @@ def validate_model(model, val_loader, device, betas, t_intervals):
             t = t_intervals[idx].to(device)
             e = torch.randn_like(targets)
             
-            loss = unified_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+            loss = streamlined_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
             total_loss += loss.item()
             num_batches += 1
     
@@ -155,13 +155,8 @@ def monitor_scaler_health(scaler, step):
     elif scale > 65536.0:  # 2^16
         logging.warning(f"High gradient scale detected: {scale:.2e} at step {step}")
     
-    # Force scale adjustment if it's too extreme
-    if scale < 0.5:
-        logging.info(f"Forcing gradient scale increase from {scale:.2e}")
-        scaler.update(new_scale=2.0)
-    elif scale > 131072.0:  # 2^17
-        logging.info(f"Forcing gradient scale decrease from {scale:.2e}")
-        scaler.update(new_scale=16384.0)  # 2^14
+    # Note: PyTorch GradScaler automatically adjusts scale based on gradient overflow
+    # We don't manually force scale adjustments as the scaler handles this internally
 
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
