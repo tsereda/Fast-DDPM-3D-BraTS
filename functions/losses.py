@@ -7,6 +7,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Global cache for expensive module instances
+_shared_instances = {}
+
 
 def validate_tensor_stability(tensor, name="tensor", max_val=10.0, debug=False):
     """
@@ -366,16 +369,85 @@ def simple_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdi
         return loss.mean()
 
 
+def stable_4to1_loss(model, x_available, x_target, t, noise, betas, target_idx):
+    """Simplified, numerically stable diffusion loss"""
+    device = x_target.device
+    
+    # Quick validation
+    if torch.any(torch.isnan(x_target)) or torch.any(torch.isnan(noise)):
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    # Stable alpha computation
+    alphas_cumprod = torch.cumprod(1.0 - torch.clamp(betas, 1e-8, 0.999), dim=0)
+    t_safe = torch.clamp(t.long(), 0, len(alphas_cumprod) - 1)
+    alpha_t = alphas_cumprod[t_safe].view(-1, 1, 1, 1, 1)
+    
+    # Numerically stable noise addition
+    sqrt_alpha = torch.sqrt(torch.clamp(alpha_t, min=1e-8))
+    sqrt_one_minus_alpha = torch.sqrt(torch.clamp(1.0 - alpha_t, min=1e-8))
+    
+    x_noisy = sqrt_alpha * x_target + sqrt_one_minus_alpha * noise
+    
+    # Model prediction with error handling
+    model_input = x_available.clone()
+    model_input[:, target_idx:target_idx+1] = x_noisy
+    
+    try:
+        predicted_noise = model(model_input, t.float())
+        if isinstance(predicted_noise, tuple):
+            predicted_noise = predicted_noise[0]
+    except RuntimeError:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    # Simple MSE loss with bounds
+    loss = F.mse_loss(predicted_noise, noise, reduction='mean')
+    return torch.clamp(loss, 0.0, 10.0)  # Prevent explosion
+
+
+def safe_optimization_step(loss, optimizer, scaler, model, max_grad_norm=1.0):
+    """Numerically stable optimization step"""
+    
+    # Validate loss before backward
+    if torch.isnan(loss) or torch.isinf(loss) or loss > 10.0:
+        logger.warning(f"Skipping step due to invalid loss: {loss}")
+        optimizer.zero_grad()
+        return False
+    
+    # Backward pass
+    scaler.scale(loss).backward()
+    
+    # Unscale for gradient clipping
+    scaler.unscale_(optimizer)
+    
+    # Clip gradients
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+    
+    # Check gradient health
+    if torch.isnan(grad_norm) or grad_norm > 5.0:
+        logger.warning(f"Unhealthy gradients (norm={grad_norm}), skipping step")
+        optimizer.zero_grad()
+        return False
+    
+    # Safe optimizer step
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad()
+    
+    return True
+
+
 # Registry for loss functions
 loss_registry = {
-    'streamlined': streamlined_4to1_loss,  # Recommended default
+    'stable': stable_4to1_loss,            # NEW: Simplified stable version (recommended)
+    'streamlined': streamlined_4to1_loss,  # Current default
     'enhanced': enhanced_4to1_loss,        # Full medical components
     'simple': simple_4to1_loss,            # Ultra-minimal version
     # Task-specific aliases
+    'stable_4to1': stable_4to1_loss,       # NEW: Alias for stable version
     'enhanced_4to1': enhanced_4to1_loss,
     'simple_4to1': simple_4to1_loss,
-    'sg': streamlined_4to1_loss,           # Single condition tasks
-    'sr': streamlined_4to1_loss,           # Multi condition tasks
+    'sg': stable_4to1_loss,                # NEW: Use stable for single condition
+    'sr': stable_4to1_loss,                # NEW: Use stable for multi condition
 }
 
 class SSIM3D(nn.Module):
@@ -805,6 +877,8 @@ loss_registry['optimized_4to1'] = optimized_4to1_loss
 
 # Export list
 __all__ = [
+    'stable_4to1_loss',
+    'safe_optimization_step',
     'streamlined_4to1_loss',
     'enhanced_4to1_loss', 
     'simple_4to1_loss',

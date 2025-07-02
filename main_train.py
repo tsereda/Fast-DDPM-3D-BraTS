@@ -24,7 +24,7 @@ sys.path.append('..')
 try:
     from data.brain_3d_unified import BraTS3DUnifiedDataset
     from models.fast_ddpm_3d import FastDDPM3D
-    from functions.losses import streamlined_4to1_loss
+    from functions.losses import stable_4to1_loss, safe_optimization_step
 except ImportError as e:
     logging.error(f"Failed to import modules: {e}")
     sys.exit(1)
@@ -374,7 +374,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Enhanced loss computation with memory management
                 with autocast():
-                    loss = streamlined_4to1_loss(model, inputs['input'], targets, t, e, b=betas, target_idx=target_idx)
+                    loss = stable_4to1_loss(model, inputs['input'], targets, t, e, betas, target_idx=target_idx)
                 
                 # Enhanced loss validation
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -393,6 +393,18 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Scale loss for gradient accumulation BEFORE backward pass
                 scaled_loss = loss / gradient_accumulation_steps
+                
+                # Check if loss is valid before proceeding
+                if torch.isnan(scaled_loss) or torch.isinf(scaled_loss) or scaled_loss > 10.0:
+                    if is_main_process(rank):
+                        logging.warning(f"Skipping batch due to invalid scaled loss: {scaled_loss}")
+                    
+                    # Clear problematic tensors
+                    del inputs, targets, e, loss, scaled_loss
+                    memory_manager.cleanup_gpu_memory(force=True)
+                    continue  # Skip this batch
+                
+                # Backward pass
                 scaler.scale(scaled_loss).backward()
                 accumulated_loss += loss.item()  # Accumulate the original (unscaled) loss for logging
                 accumulation_steps += 1
@@ -402,31 +414,32 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 # Step optimizer when we've accumulated enough gradients
                 if accumulation_steps >= gradient_accumulation_steps:
-                    # Unscale gradients for gradient clipping
-                    scaler.unscale_(optimizer)
+                    # Calculate average loss over accumulation steps
+                    average_loss = accumulated_loss / gradient_accumulation_steps
                     
-                    # Apply gradient clipping
+                    # Safe gradient step with clipping
+                    scaler.unscale_(optimizer)
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 
-                        max_norm=getattr(config.training, 'gradient_clip', float('inf'))
+                        max_norm=getattr(config.training, 'gradient_clip', 1.0)
                     )
                     
-                    # Step optimizer and update scaler
+                    # Check gradient health before stepping
+                    if torch.isnan(grad_norm) or grad_norm > 5.0:
+                        if is_main_process(rank):
+                            logging.warning(f"Unhealthy gradients (norm={grad_norm}), skipping step")
+                        optimizer.zero_grad()
+                        accumulated_loss = 0.0
+                        accumulation_steps = 0
+                        continue
+                    
+                    # Safe optimizer step
                     scaler.step(optimizer)
                     scaler.update()
-                    
-                    # Zero gradients for next accumulation cycle
                     optimizer.zero_grad()
-                    
-                    # Monitor gradient scaler health
-                    if global_step % 100 == 0:  # Check every 100 steps
-                        monitor_scaler_health(scaler, global_step)
                     
                     # Now we've completed one effective training step
                     global_step += 1
-                    
-                    # Calculate average loss over accumulation steps
-                    average_loss = accumulated_loss / gradient_accumulation_steps
                     epoch_loss += average_loss
                     
                     step_time = time.time() - step_start_time
@@ -442,7 +455,8 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                             'target': f'{target_idx}',
                             'step': global_step,
                             'mem_gb': f'{memory_gb:.1f}',
-                            'step_time': f'{step_time:.2f}s'
+                            'step_time': f'{step_time:.2f}s',
+                            'grad_norm': f'{grad_norm:.3f}'
                         })
                     
                     # W&B logging
