@@ -12,8 +12,19 @@ import torch
 def get_available_gpus():
     """Get list of available GPU IDs"""
     if not torch.cuda.is_available():
+        print("CUDA not available!")
         return []
-    return list(range(torch.cuda.device_count()))
+    
+    device_count = torch.cuda.device_count()
+    print(f"Detected {device_count} CUDA devices")
+    
+    # Print GPU information
+    for i in range(device_count):
+        gpu_name = torch.cuda.get_device_name(i)
+        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3  # GB
+        print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
+    
+    return list(range(device_count))
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Multi-GPU Fast-DDPM 3D Training Launcher')
@@ -35,18 +46,36 @@ def parse_args():
 def main():
     args = parse_args()
     
+    print("=== Multi-GPU Training Launcher ===")
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
+    
     # Get available GPUs
     if args.gpus == 'auto':
         gpu_ids = get_available_gpus()
+        if len(gpu_ids) > 1:
+            print(f"Auto-detected {len(gpu_ids)} GPUs - enabling multi-GPU training")
+        else:
+            print(f"Auto-detected {len(gpu_ids)} GPU - single GPU training")
     else:
         gpu_ids = [int(x) for x in args.gpus.split(',')]
+        print(f"User specified GPUs: {gpu_ids}")
     
     if not gpu_ids:
-        print("No GPUs available!")
+        print("❌ No GPUs available!")
         sys.exit(1)
     
-    print(f"Using GPUs: {gpu_ids}")
-    print(f"Number of GPUs: {len(gpu_ids)}")
+    print(f"✅ Using GPUs: {gpu_ids}")
+    print(f"✅ Number of GPUs: {len(gpu_ids)}")
+    
+    # Decide on training strategy
+    if len(gpu_ids) > 1:
+        if args.use_ddp:
+            print("🚀 Strategy: DistributedDataParallel (DDP)")
+        else:
+            print("🚀 Strategy: DataParallel (DP) - enabling multi_gpu flag")
+            # Enable multi_gpu flag for main training script
+    else:
+        print("🚀 Strategy: Single GPU training")
     
     # Set environment variables
     os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, gpu_ids))

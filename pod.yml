@@ -19,7 +19,7 @@ spec:
         - name: PYTHONPATH
           value: /app/Fast-DDPM-3D-BraTS
         - name: CUDA_VISIBLE_DEVICES
-          value: "0"
+          value: "0,1"
         # nnUNet paths
         - name: nnUNet_raw
           value: /app/nnunet/raw
