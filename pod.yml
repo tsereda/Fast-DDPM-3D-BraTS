@@ -72,7 +72,7 @@ spec:
           python -c "import torch; print(f'GPUs available: {torch.cuda.device_count()}')"
           
           echo "Starting multi-GPU training with W&B logging..."
-          PYTHONUNBUFFERED=1 python scripts/train_multi_gpu.py \
+          PYTHONUNBUFFERED=1 python main_train.py \
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
             --gpus auto \
             --use_wandb \

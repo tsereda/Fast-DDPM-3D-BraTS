@@ -110,7 +110,7 @@ class DistributedMemoryManager(MemoryManager):
         
     def log_memory_usage(self, prefix=""):
         """Log memory usage with rank information"""
-        from .distributed_utils import is_main_process
+        from distributed_utils import is_main_process
         if is_main_process(self.rank):
             stats = self.get_memory_stats()
             if stats:

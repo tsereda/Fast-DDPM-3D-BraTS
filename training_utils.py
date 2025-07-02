@@ -10,7 +10,7 @@ import yaml
 import numpy as np
 import argparse
 from tqdm import tqdm
-from .distributed_utils import is_main_process
+from distributed_utils import is_main_process
 
 # Optional wandb import
 try:
