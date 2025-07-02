@@ -63,9 +63,6 @@ def setup_datasets(args, config):
     """Setup training and validation datasets"""
     logging.info("Setting up datasets...")
     
-    # Use provided volume size or default
-    volume_size = tuple(config.data.volume_size) if hasattr(config.data, 'volume_size') else (80, 80, 80)
-    print(f"Using volume size: {volume_size}")
     
     # Check if data root exists
     if not os.path.exists(args.data_root):
@@ -73,14 +70,12 @@ def setup_datasets(args, config):
     
     train_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
-        phase='train',
-        volume_size=volume_size
+        phase='train'
     )
     
     val_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
-        phase='val',
-        volume_size=volume_size
+        phase='val'
     )
     
     if args.debug:
