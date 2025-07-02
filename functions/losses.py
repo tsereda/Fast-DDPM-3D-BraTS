@@ -199,8 +199,9 @@ def streamlined_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, k
         
         # Add 3D SSIM loss (structural similarity) - memory intensive
         try:
-            ssim_3d = SSIM3D().to(device)
-            ssim_loss = 1.0 - ssim_3d(x0_pred, x_target)
+            if "SSIM3D" not in _shared_instances:
+                _shared_instances["SSIM3D"] = SSIM3D().to(device)
+            ssim_loss = 1.0 - _shared_instances["SSIM3D"](x0_pred, x_target)
             total_loss = total_loss + 0.1 * ssim_loss  # Weight: 10% of MSE
         except RuntimeError as ex:
             if "out of memory" in str(ex).lower():
