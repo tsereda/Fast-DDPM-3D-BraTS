@@ -59,6 +59,11 @@ sampling:
     scheduler_type: "uniform"       # or "non-uniform"
     eta: 0.0                       # DDIM parameter
     batch_size: 2
+    
+    # Noise initialization
+    init_type: "gaussian"          # Use Gaussian noise instead of zeros
+    noise_std: 1.0                 # Standard deviation for Gaussian noise
+    noise_mean: 0.0                # Mean for Gaussian noise
 
 # Device and precision
 device: "cuda"
