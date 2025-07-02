@@ -33,7 +33,7 @@ training:
     batch_size: 1                  # Small for 3D memory constraints (per GPU)
     gradient_accumulation_steps: 2   # Effective batch size = batch_size * world_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.00001          # Reduced for better stability
+    learning_rate: 0.00005
     weight_decay: 0.0
     gradient_clip: 10.0             # Increased threshold for diffusion models
     
