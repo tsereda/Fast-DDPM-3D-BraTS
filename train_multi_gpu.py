@@ -8,6 +8,15 @@ import sys
 import argparse
 import subprocess
 import torch
+import socket
+
+def find_free_port():
+    """Find a free port for distributed training"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
 
 def get_available_gpus():
     """Get list of available GPU IDs"""
@@ -34,7 +43,7 @@ def parse_args():
     parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats_multigpu', help='Experiment name')
     parser.add_argument('--gpus', type=str, default='auto', help='GPU IDs to use (e.g., "0,1,2,3" or "auto")')
     parser.add_argument('--backend', type=str, default='nccl', choices=['nccl', 'gloo'], help='Distributed backend')
-    parser.add_argument('--port', type=str, default='12355', help='Master port for distributed training')
+    parser.add_argument('--port', type=str, default='auto', help='Master port for distributed training (auto for random port)')
     parser.add_argument('--use_ddp', action='store_true', help='Use DistributedDataParallel instead of DataParallel')
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
@@ -84,9 +93,16 @@ def main():
         # Use DistributedDataParallel
         print("Launching DistributedDataParallel training...")
         
+        # Get a free port
+        if args.port == 'auto':
+            master_port = str(find_free_port())
+            print(f"Using auto-selected port: {master_port}")
+        else:
+            master_port = args.port
+        
         # Set up distributed training environment
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = args.port
+        os.environ['MASTER_PORT'] = master_port
         os.environ['WORLD_SIZE'] = str(len(gpu_ids))
         
         # Launch training processes
@@ -95,7 +111,8 @@ def main():
             env = os.environ.copy()
             env['RANK'] = str(i)
             env['LOCAL_RANK'] = str(i)
-            env['CUDA_VISIBLE_DEVICES'] = str(i)  # Each process sees only its GPU
+            # Keep original CUDA_VISIBLE_DEVICES so each process can see all assigned GPUs
+            # but they will use their local rank to select the correct one
             
             cmd = [
                 sys.executable, 'main_train.py',
@@ -120,20 +137,42 @@ def main():
             
             print(f"Starting process {i} on GPU {gpu_id}")
             print(f"Command: {' '.join(cmd)}")
+            print(f"Environment - RANK: {i}, LOCAL_RANK: {i}, CUDA_VISIBLE_DEVICES: {env.get('CUDA_VISIBLE_DEVICES')}")
             
-            p = subprocess.Popen(cmd, env=env)
-            processes.append(p)
+            try:
+                p = subprocess.Popen(cmd, env=env)
+                processes.append(p)
+            except Exception as e:
+                print(f"Failed to start process {i}: {e}")
+                # Clean up any started processes
+                for started_p in processes:
+                    started_p.terminate()
+                raise
         
         # Wait for all processes to complete
         try:
-            for p in processes:
-                p.wait()
+            exit_codes = []
+            for i, p in enumerate(processes):
+                exit_code = p.wait()
+                exit_codes.append(exit_code)
+                if exit_code != 0:
+                    print(f"⚠️  Process {i} exited with code {exit_code}")
+                else:
+                    print(f"✅ Process {i} completed successfully")
+            
+            if any(code != 0 for code in exit_codes):
+                print(f"❌ Some processes failed. Exit codes: {exit_codes}")
+                sys.exit(1)
+            else:
+                print("🎉 All processes completed successfully!")
+                
         except KeyboardInterrupt:
-            print("Terminating all processes...")
+            print("\n🛑 Interrupted by user. Terminating all processes...")
             for p in processes:
                 p.terminate()
             for p in processes:
                 p.wait()
+            sys.exit(1)
     
     else:
         # Use DataParallel or single GPU

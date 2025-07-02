@@ -76,6 +76,7 @@ spec:
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
             --gpus auto \
             --use_ddp \
+            --port auto \
             --use_wandb \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \

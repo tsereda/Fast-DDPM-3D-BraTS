@@ -566,6 +566,13 @@ def main(args=None):
     if args is None:
         args = parse_args()
     
+    print(f"=== MAIN FUNCTION START ===")
+    print(f"Process PID: {os.getpid()}")
+    print(f"Args distributed: {args.distributed}")
+    print(f"Environment variables:")
+    for key in ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT', 'CUDA_VISIBLE_DEVICES']:
+        print(f"  {key}: {os.environ.get(key, 'not set')}")
+    
     # Setup distributed training
     rank, world_size, device = setup_distributed(args)
     
@@ -623,7 +630,14 @@ if __name__ == '__main__':
     args = parse_args()
     
     try:
-        launch_distributed_training(args, main)
+        # Check if we're already in a distributed process (launched by train_multi_gpu.py)
+        if args.distributed and ('RANK' in os.environ and 'WORLD_SIZE' in os.environ):
+            # We're already in a distributed process, call main directly
+            print(f"Process launched with RANK={os.environ.get('RANK')}, LOCAL_RANK={os.environ.get('LOCAL_RANK')}")
+            main(args)
+        else:
+            # Use internal distributed launcher
+            launch_distributed_training(args, main)
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
         if WANDB_AVAILABLE and wandb.run is not None:
