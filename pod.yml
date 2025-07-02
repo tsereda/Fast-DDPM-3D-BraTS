@@ -78,6 +78,7 @@ spec:
             --use_ddp \
             --port auto \
             --use_wandb \
+            --sa
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
             --doc pod-multigpu-training-$(date +%Y%m%d-%H%M%S)

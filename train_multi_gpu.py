@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
     parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity')
+    parser.add_argument('--sample_every', type=int, default=1, help='Sample images every N epochs')
     
     return parser.parse_args()
 
@@ -134,6 +135,10 @@ def main():
                 cmd.extend(['--use_wandb', '--wandb_project', args.wandb_project])
                 if args.wandb_entity:
                     cmd.extend(['--wandb_entity', args.wandb_entity])
+            if args.sample_every is not None:
+                cmd.extend(['--sample_every', str(args.sample_every)])
+            if args.sample_every is not None:
+                cmd.extend(['--sample_every', str(args.sample_every)])
             
             print(f"Starting process {i} on GPU {gpu_id}")
             print(f"Command: {' '.join(cmd)}")
@@ -197,6 +202,10 @@ def main():
             cmd.extend(['--use_wandb', '--wandb_project', args.wandb_project])
             if args.wandb_entity:
                 cmd.extend(['--wandb_entity', args.wandb_entity])
+        if args.sample_every is not None:
+            cmd.extend(['--sample_every', str(args.sample_every)])
+        if args.sample_every is not None:
+            cmd.extend(['--sample_every', str(args.sample_every)])
         
         print(f"Command: {' '.join(cmd)}")
         subprocess.run(cmd)
