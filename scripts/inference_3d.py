@@ -11,15 +11,15 @@ import torch
 import nibabel as nib
 import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 
 # Add path
 sys.path.append('.')
 sys.path.append('..')
 
 from models.fast_ddpm_3d import FastDDPM3D
-from functions.denoising_3d import generalized_steps_3d, unified_4to1_generalized_steps_3d
+from functions.denoising_3d import unified_4to1_generalized_steps_3d
 from data.brain_3d_unified import BraTS3DUnifiedDataset
-from data.image_folder import get_available_3d_vol_names
 
 
 def parse_args():
@@ -91,9 +91,34 @@ def get_sampling_sequence(scheduler, timesteps, num_timesteps):
     return list(seq)
 
 
+def find_modality_files(case_path, modalities):
+    """Find modality files in a case directory"""
+    vol_files = {}
+    
+    for modality in modalities:
+        patterns = [
+            f'*{modality}*.nii*',
+            f'*{modality.upper()}*.nii*',
+            f'*-{modality}.nii*',
+            f'*_{modality}.nii*'
+        ]
+        
+        found_file = None
+        for pattern in patterns:
+            files = list(case_path.glob(pattern))
+            if files:
+                # Prefer .nii.gz over .nii
+                files.sort(key=lambda x: (x.suffix != '.gz', x.name))
+                found_file = files[0]
+                break
+        
+        vol_files[modality] = found_file
+    
+    return vol_files
+
+
 def load_brats_case(case_path, modalities, volume_size, target_modality):
     """Load a BraTS case with available modalities"""
-    import torchvision.transforms as transforms
     
     def reorient_volume(nifti_img):
         orig_ornt = nib.orientations.io_orientation(nifti_img.affine)
@@ -116,17 +141,17 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
         return volume
     
     # Find available files
-    vol_files, _ = get_available_3d_vol_names(case_path)
+    vol_files = find_modality_files(case_path, modalities)
     
     volumes = {}
     available_modalities = []
     
     for modality in modalities:
         if vol_files[modality] is not None:
-            file_path = os.path.join(case_path, vol_files[modality])
+            file_path = vol_files[modality]
             
             # Load and process
-            nifti_img = nib.load(file_path)
+            nifti_img = nib.load(str(file_path))
             nifti_img = reorient_volume(nifti_img)
             data = crop_volume(nifti_img)
             data = normalize_volume(data)
@@ -229,8 +254,8 @@ def main():
     volume_size = tuple(config.data.volume_size)
     
     # Find all case directories
-    case_dirs = [d for d in os.listdir(args.input_dir) 
-                if os.path.isdir(os.path.join(args.input_dir, d))]
+    input_path = Path(args.input_dir)
+    case_dirs = [d for d in input_path.iterdir() if d.is_dir()]
     case_dirs.sort()
     
     print(f"Found {len(case_dirs)} cases")
@@ -240,15 +265,13 @@ def main():
     results = []
     
     for case_dir in tqdm(case_dirs, desc="Processing cases"):
-        case_path = os.path.join(args.input_dir, case_dir)
-        
         try:
             # Load case
             input_tensor, modality_mask, target_tensor, reference_affine, available_modalities = load_brats_case(
-                case_path, modalities, volume_size, args.target_modality
+                case_dir, modalities, volume_size, args.target_modality
             )
             
-            print(f"\nCase: {case_dir}")
+            print(f"\nCase: {case_dir.name}")
             print(f"Available modalities: {available_modalities}")
             print(f"Missing: {args.target_modality}")
             
@@ -274,7 +297,7 @@ def main():
             print(f"Target index: {target_idx}")
             
             with torch.no_grad():
-                # Sampling - corrected function call
+                # Sampling
                 print("Generating...")
                 xs, x0_preds = unified_4to1_generalized_steps_3d(
                     x, input_batch, target_idx, seq, model, betas, eta=args.eta
@@ -290,7 +313,7 @@ def main():
                 print(f"Generated range: [{generated.min():.3f}, {generated.max():.3f}]")
                 
                 # Save result
-                output_filename = f"{case_dir}_{args.target_modality}_generated.nii.gz"
+                output_filename = f"{case_dir.name}_{args.target_modality}_generated.nii.gz"
                 output_path = os.path.join(args.output_dir, output_filename)
                 
                 save_generated_volume(generated, reference_affine, output_path)
@@ -298,7 +321,7 @@ def main():
                 
                 # If target exists, save for comparison
                 if target_tensor is not None:
-                    target_filename = f"{case_dir}_{args.target_modality}_ground_truth.nii.gz"
+                    target_filename = f"{case_dir.name}_{args.target_modality}_ground_truth.nii.gz"
                     target_path = os.path.join(args.output_dir, target_filename)
                     save_generated_volume(target_tensor, reference_affine, target_path)
                     
@@ -308,24 +331,14 @@ def main():
                     print(f"MSE: {mse:.6f}, MAE: {mae:.6f}")
                     
                     results.append({
-                        'case': case_dir,
+                        'case': case_dir.name,
                         'mse': mse,
                         'mae': mae,
                         'available': available_modalities
                     })
                 
-        except FileNotFoundError as e:
-            print(f"File not found for {case_dir}: {e}")
-            continue
-        except torch.cuda.OutOfMemoryError as e:
-            print(f"GPU out of memory for {case_dir}: {e}")
-            torch.cuda.empty_cache()
-            continue
-        except ValueError as e:
-            print(f"Value error processing {case_dir}: {e}")
-            continue
         except Exception as e:
-            print(f"Unexpected error processing {case_dir}: {e}")
+            print(f"Error processing {case_dir.name}: {e}")
             import traceback
             print(f"Traceback: {traceback.format_exc()}")
             continue
