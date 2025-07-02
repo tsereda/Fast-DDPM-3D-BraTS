@@ -3,9 +3,9 @@
 
 data:
     dataset: "BraTS3D"
-    crop_size: [64, 64, 64]      # Professor: Use cropping instead of rescaling
-    crops_per_volume: 4          # Multiple crops per MRI for data augmentation
-    channels: 1                  # Output channels (target modality)
+    crop_size: [128, 128, 64]   
+    crops_per_volume: 4    
+    channels: 1    
     num_workers: 4
     normalization: "min_max_0_1" # Professor: Min-max normalization to [0,1]
 
