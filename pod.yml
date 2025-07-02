@@ -72,10 +72,10 @@ spec:
           PYTHONUNBUFFERED=1 python scripts/train_3d.py \
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
             --use_wandb \
+            --sample_every 50 \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
-            --doc pod-training-$(date +%Y%m%d-%H%M%S) \
-            --sample_every 50
+            --doc pod-training-$(date +%Y%m%d-%H%M%S)
           
           tail -f /dev/null
       

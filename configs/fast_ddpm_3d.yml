@@ -1,22 +1,25 @@
+# Fast-DDPM 3D Configuration for BraTS Modality Synthesis
+# 4 input modalities → 1 target modality synthesis
+
 data:
     dataset: "BraTS3D"
-    volume_size: [64, 64, 64]  # Reduced from 80 for memory safety
-    channels: 1
+    volume_size: [64, 64, 64]  # Conservative for memory
+    channels: 1               # Output channels (target modality)
     num_workers: 4
 
 model:
-    type: "unified_4to1"  # Corrected: 4 input modalities → 1 target modality
-    in_channels: 4        # Input: all 4 modalities
-    out_ch: 1            # Output: single target modality
-    ch: 64               # Reduced for 3D memory constraints
-    ch_mult: [1, 2, 4]   # Reduced depth for 3D
-    num_res_blocks: 2
-    attn_resolutions: [16]  # Adjusted for 64x64x64 volumes
+    type: "unified_4to1"     # 4 input modalities → 1 target modality
+    in_channels: 4           # Input: all 4 BraTS modalities
+    out_ch: 1               # Output: single target modality
+    ch: 64                  # Base channels (reduced for 3D memory)
+    ch_mult: [1, 2, 4]      # Channel multipliers (3 levels for 3D)
+    num_res_blocks: 2       # ResNet blocks per level
+    attn_resolutions: [16]  # Attention at 16x16x16 resolution
     dropout: 0.1
-    var_type: fixedsmall
-    ema_rate: 0.9999
+    var_type: fixedsmall    # Fixed variance (not learned)
+    ema_rate: 0.9999        # Exponential moving average
     ema: True
-    resamp_with_conv: True
+    resamp_with_conv: True  # Use conv for up/downsampling
 
 diffusion:
     beta_schedule: linear
@@ -25,31 +28,33 @@ diffusion:
     num_diffusion_timesteps: 1000
 
 training:
-    batch_size: 1        # Small batch size for 3D
+    batch_size: 1                    # Small for 3D memory constraints
+    gradient_accumulation_steps: 4   # Effective batch size = 4
     epochs: 1000
-    learning_rate: 0.00001  # REDUCED from 0.0001 for stability with small batch
+    learning_rate: 0.00001          # Conservative for stability
     weight_decay: 0.0
     gradient_clip: 1.0
-    save_every: 2000     # Save checkpoint every 2000 training steps (less frequent)
-    validate_every: 1000 # Validate every 1000 training steps
-    log_every_n_steps: 50
-    # Gradient accumulation will be controlled via command line argument
     
-    # Loss scaling settings for stability
-    loss_scale_init: 2048.0    # Initial loss scale (lower than default 65536)
-    loss_scale_growth: 2000    # Steps between scale increases
-    loss_scale_backoff: 0.5    # Scale reduction factor on overflow
-    
+    # Checkpointing
+    save_every: 2000                # Save every 2000 steps
+    validate_every: 1000            # Validate every 1000 steps
+    log_every_n_steps: 50           # Log progress every 50 steps
+
 optim:
-    weight_decay: 0.0
     optimizer: "Adam"
-    lr: 0.00001  # REDUCED from 0.0001
+    lr: 0.00001                     # Same as training.learning_rate
     beta1: 0.9
+    weight_decay: 0.0
     amsgrad: false
     eps: 0.00000001
 
-# Additional stability settings
-stability:
-    warmup_steps: 1000          # Gradual learning rate warmup
-    memory_cleanup_interval: 100 # Clear GPU cache every N steps
-    nan_check_interval: 50      # Check for NaN values in loss/gradients
+# Sampling configuration
+sampling:
+    timesteps: 10                   # Fast-DDPM: only 10 steps
+    scheduler_type: "uniform"       # or "non-uniform"
+    eta: 0.0                       # DDIM parameter
+    batch_size: 1
+
+# Device and precision
+device: "cuda"
+mixed_precision: True              # Enable for memory efficiency
