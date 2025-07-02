@@ -137,6 +137,7 @@ def streamlined_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, k
     
     # Quick NaN check (simplified - no expensive fallbacks)
     if torch.isnan(x_target).any() or torch.isnan(e).any():
+        logger.warning(f"NaN detected in inputs for target_idx={target_idx}")
         return torch.tensor(0.0, device=device, requires_grad=True)
     
     # Efficient alpha computation (vectorized)
@@ -149,16 +150,26 @@ def streamlined_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, k
     sqrt_1_minus_a = torch.sqrt(1.0 - a)
     x_noisy = x_target * sqrt_a + e * sqrt_1_minus_a
     
-    # Prepare model input
+    # Prepare model input (memory efficient)
     model_input = x_available.clone()
     model_input[:, target_idx:target_idx+1] = x_noisy
     
-    # Model prediction with basic error handling
+    # Model prediction with enhanced error handling
     try:
         predicted_noise = model(model_input, t.float())
         if isinstance(predicted_noise, tuple):
             predicted_noise = predicted_noise[0]
-    except Exception:
+            
+        # Validate prediction shape
+        if predicted_noise.shape != e.shape:
+            logger.warning(f"Shape mismatch: predicted {predicted_noise.shape} vs expected {e.shape}")
+            return torch.tensor(0.0, device=device, requires_grad=True)
+            
+    except RuntimeError as ex:
+        logger.error(f"Model forward pass failed: {ex}")
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    except Exception as ex:
+        logger.error(f"Unexpected error in model forward: {ex}")
         return torch.tensor(0.0, device=device, requires_grad=True)
     
     # Core MSE loss (primary component)
@@ -166,33 +177,52 @@ def streamlined_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, k
     
     # Apply FF-Parser for stability (if needed)
     if torch.isnan(mse_loss).any() or torch.isinf(mse_loss).any():
-        ff_parser = FFParser3D().to(device)
-        predicted_noise = ff_parser(predicted_noise)
-        mse_loss = F.mse_loss(predicted_noise, e, reduction='none')
+        logger.warning("NaN/Inf detected in MSE loss, applying FF-Parser")
+        try:
+            ff_parser = FFParser3D().to(device)
+            predicted_noise = ff_parser(predicted_noise)
+            mse_loss = F.mse_loss(predicted_noise, e, reduction='none')
+        except Exception as ex:
+            logger.warning(f"FF-Parser failed: {ex}, using fallback")
+            return torch.tensor(0.1, device=device, requires_grad=True)  # Small fallback loss
     
-    # Additional medical-specific components (computed on denoised prediction)
-    with torch.no_grad():
-        # Predict clean image for auxiliary losses
-        x0_pred = (x_noisy - sqrt_1_minus_a * predicted_noise) / sqrt_a
-        x0_pred = torch.clamp(x0_pred, -1, 1)  # Clamp to valid range
-    
+    # Initialize total loss
     total_loss = mse_loss
     
-    # Add 3D SSIM loss (structural similarity)
-    try:
-        ssim_3d = SSIM3D().to(device)
-        ssim_loss = 1.0 - ssim_3d(x0_pred, x_target)
-        total_loss = total_loss + 0.1 * ssim_loss  # Weight: 10% of MSE
-    except:
-        pass  # Skip if SSIM computation fails
+    # Additional medical-specific components (computed on denoised prediction)
+    # Only add auxiliary losses for small batches to manage memory
+    if batch_size <= 2:
+        with torch.no_grad():
+            # Predict clean image for auxiliary losses
+            x0_pred = (x_noisy - sqrt_1_minus_a * predicted_noise) / sqrt_a
+            x0_pred = torch.clamp(x0_pred, -1, 1)  # Clamp to valid range
+        
+        # Add 3D SSIM loss (structural similarity) - memory intensive
+        try:
+            ssim_3d = SSIM3D().to(device)
+            ssim_loss = 1.0 - ssim_3d(x0_pred, x_target)
+            total_loss = total_loss + 0.1 * ssim_loss  # Weight: 10% of MSE
+        except RuntimeError as ex:
+            if "out of memory" in str(ex).lower():
+                logger.warning("SSIM computation skipped due to memory constraints")
+            else:
+                logger.warning(f"SSIM computation failed: {ex}")
+        except Exception:
+            pass  # Skip if SSIM computation fails
+        
+        # Add gradient loss (edge preservation) - lightweight
+        try:
+            grad_loss_fn = GradientLoss3D().to(device)
+            grad_loss = grad_loss_fn(x0_pred, x_target)
+            total_loss = total_loss + 0.05 * grad_loss  # Weight: 5% of MSE
+        except Exception as ex:
+            logger.warning(f"Gradient loss computation failed: {ex}")
     
-    # Add gradient loss (edge preservation)
-    try:
-        grad_loss_fn = GradientLoss3D().to(device)
-        grad_loss = grad_loss_fn(x0_pred, x_target)
-        total_loss = total_loss + 0.05 * grad_loss  # Weight: 5% of MSE
-    except:
-        pass  # Skip if gradient computation fails
+    # Modality-specific weighting (based on BraTS importance)
+    modality_weights = [1.0, 1.1, 0.95, 1.05]  # T1, T1ce, T2, FLAIR
+    if target_idx < len(modality_weights):
+        modality_weight = modality_weights[target_idx]
+        total_loss = total_loss * modality_weight
     
     # Aggregate loss
     if keepdim:
@@ -543,11 +573,242 @@ def validate_loss_inputs(x_available, x_target, t, e, b, target_idx):
         return False
 
 
+def monitor_loss_components(model, x_available, x_target, t, e, b, target_idx=0):
+    """
+    Monitor individual loss components for debugging and analysis
+    
+    Args:
+        model: 3D diffusion model
+        x_available: [B, 4, H, W, D] - all modalities with target masked
+        x_target: [B, 1, H, W, D] - target modality volume  
+        t: [B] - timesteps
+        e: [B, 1, H, W, D] - noise tensor
+        b: [T] - beta schedule
+        target_idx: int - which modality is being synthesized
+        
+    Returns:
+        dict: Individual loss components for logging
+    """
+    device = x_target.device
+    batch_size = x_target.size(0)
+    
+    # Compute alpha values
+    alphas_cumprod = torch.cumprod(1.0 - torch.clamp(b, 1e-8, 0.999), dim=0)
+    t_clamped = torch.clamp(t.long(), 0, len(alphas_cumprod) - 1)
+    a = alphas_cumprod[t_clamped].view(-1, 1, 1, 1, 1)
+    
+    # Add noise to target
+    sqrt_a = torch.sqrt(a)
+    sqrt_1_minus_a = torch.sqrt(1.0 - a)
+    x_noisy = x_target * sqrt_a + e * sqrt_1_minus_a
+    
+    # Model input
+    model_input = x_available.clone()
+    model_input[:, target_idx:target_idx+1] = x_noisy
+    
+    # Model prediction
+    with torch.no_grad():
+        try:
+            predicted_noise = model(model_input, t.float())
+            if isinstance(predicted_noise, tuple):
+                predicted_noise = predicted_noise[0]
+        except Exception:
+            return {"mse_loss": 0.0, "ssim_loss": 0.0, "grad_loss": 0.0, "error": True}
+    
+    # MSE loss
+    mse_loss = F.mse_loss(predicted_noise, e).item()
+    
+    # Initialize results
+    results = {
+        "mse_loss": mse_loss,
+        "ssim_loss": 0.0,
+        "grad_loss": 0.0,
+        "modality": target_idx,
+        "error": False
+    }
+    
+    # Auxiliary losses (if batch size allows)
+    if batch_size <= 2:
+        try:
+            # Predict clean image
+            x0_pred = (x_noisy - sqrt_1_minus_a * predicted_noise) / sqrt_a
+            x0_pred = torch.clamp(x0_pred, -1, 1)
+            
+            # SSIM loss
+            try:
+                ssim_3d = SSIM3D().to(device)
+                ssim_loss = (1.0 - ssim_3d(x0_pred, x_target)).item()
+                results["ssim_loss"] = ssim_loss
+            except Exception:
+                pass
+            
+            # Gradient loss
+            try:
+                grad_loss_fn = GradientLoss3D().to(device)
+                grad_loss = grad_loss_fn(x0_pred, x_target).item()
+                results["grad_loss"] = grad_loss
+            except Exception:
+                pass
+                
+        except Exception:
+            results["error"] = True
+    
+    return results
+
+
+def adaptive_loss_weights(epoch, total_epochs=1000, warmup_epochs=50):
+    """
+    Adaptive loss weights that evolve during training
+    
+    Args:
+        epoch: Current epoch (0-indexed)
+        total_epochs: Total training epochs
+        warmup_epochs: Number of warmup epochs
+        
+    Returns:
+        dict: Loss weights for current epoch
+    """
+    # During warmup: focus on MSE loss
+    if epoch < warmup_epochs:
+        mse_weight = 1.0
+        ssim_weight = 0.05 * (epoch / warmup_epochs)  # Gradually increase
+        grad_weight = 0.02 * (epoch / warmup_epochs)  # Gradually increase
+    
+    # Early training: balanced weights
+    elif epoch < total_epochs * 0.3:
+        mse_weight = 1.0
+        ssim_weight = 0.10
+        grad_weight = 0.05
+    
+    # Mid training: emphasize structure
+    elif epoch < total_epochs * 0.7:
+        mse_weight = 1.0
+        ssim_weight = 0.15  # Increase structural importance
+        grad_weight = 0.08  # Increase edge preservation
+    
+    # Late training: fine-tuning balance
+    else:
+        mse_weight = 1.0
+        ssim_weight = 0.12
+        grad_weight = 0.06
+    
+    return {
+        'mse': mse_weight,
+        'ssim': ssim_weight,
+        'gradient': grad_weight
+    }
+
+
+def optimized_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdim=False, epoch=0):
+    """
+    Optimized 4→1 Fast-DDPM loss for BraTS training with adaptive components
+    
+    Features:
+    - Memory-efficient computation
+    - Adaptive auxiliary loss scheduling
+    - Modality-specific handling
+    - Training stage awareness
+    
+    Args:
+        model: 3D diffusion model (outputs 1 channel)
+        x_available: [B, 4, H, W, D] - all modalities with target masked (zeroed)
+        x_target: [B, 1, H, W, D] - target modality volume  
+        t: [B] - timesteps
+        e: [B, 1, H, W, D] - noise tensor (same shape as target)
+        b: [T] - beta schedule
+        target_idx: int - which modality is being synthesized (0-3)
+        keepdim: bool - whether to keep batch dimension in loss
+        epoch: int - current training epoch for adaptive weighting
+        
+    Returns:
+        loss: scalar tensor (mean) or [B] tensor (keepdim=True)
+    """
+    device = x_target.device
+    batch_size = x_target.size(0)
+    
+    # Early validation
+    if torch.isnan(x_target).any() or torch.isnan(e).any():
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    # Efficient alpha computation
+    alphas_cumprod = torch.cumprod(1.0 - torch.clamp(b, 1e-8, 0.999), dim=0)
+    t_safe = torch.clamp(t.long(), 0, len(alphas_cumprod) - 1)
+    a = alphas_cumprod[t_safe].view(-1, 1, 1, 1, 1)
+    
+    # Noise injection
+    sqrt_a = torch.sqrt(a)
+    sqrt_1_minus_a = torch.sqrt(1.0 - a)
+    x_noisy = x_target * sqrt_a + e * sqrt_1_minus_a
+    
+    # Model input preparation
+    model_input = x_available.clone()
+    model_input[:, target_idx:target_idx+1] = x_noisy
+    
+    # Model prediction
+    try:
+        predicted_noise = model(model_input, t.float())
+        if isinstance(predicted_noise, tuple):
+            predicted_noise = predicted_noise[0]
+    except Exception:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    # Core MSE loss
+    mse_loss = F.mse_loss(predicted_noise, e, reduction='none')
+    
+    # Get adaptive weights based on training stage
+    weights = adaptive_loss_weights(epoch)
+    total_loss = weights['mse'] * mse_loss
+    
+    # Auxiliary losses (memory and compute aware)
+    use_auxiliary = (
+        batch_size <= 2 and  # Memory constraint
+        epoch >= 10 and     # Skip early training
+        epoch % 5 == 0       # Compute every 5th epoch only
+    )
+    
+    if use_auxiliary:
+        with torch.no_grad():
+            x0_pred = (x_noisy - sqrt_1_minus_a * predicted_noise) / sqrt_a
+            x0_pred = torch.clamp(x0_pred, -1, 1)
+        
+        # Lightweight gradient loss only (skip expensive SSIM)
+        try:
+            grad_loss_fn = GradientLoss3D().to(device)
+            grad_loss = grad_loss_fn(x0_pred, x_target)
+            total_loss = total_loss + weights['gradient'] * grad_loss
+        except Exception:
+            pass
+    
+    # Modality-specific weighting for BraTS
+    modality_weights = {
+        0: 1.0,   # T1 - baseline
+        1: 1.15,  # T1ce - enhanced (important for tumor core)
+        2: 0.95,  # T2 - slightly lower weight
+        3: 1.05   # FLAIR - important for edema
+    }
+    
+    if target_idx in modality_weights:
+        total_loss = total_loss * modality_weights[target_idx]
+    
+    # Final aggregation
+    if keepdim:
+        return total_loss.view(batch_size, -1).mean(dim=1)
+    else:
+        return total_loss.mean()
+
+
+# Add to registry
+loss_registry['optimized'] = optimized_4to1_loss
+loss_registry['optimized_4to1'] = optimized_4to1_loss
+
+
 # Export list
 __all__ = [
     'streamlined_4to1_loss',
     'enhanced_4to1_loss', 
     'simple_4to1_loss',
+    'monitor_loss_components',
+    'adaptive_loss_weights',
     'loss_registry',
     'get_loss_function',
     'validate_loss_inputs',
