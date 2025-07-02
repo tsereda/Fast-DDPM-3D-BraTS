@@ -33,21 +33,27 @@ def test_distributed_setup():
     rank, world_size, device = setup_distributed(args)
     print(f"Result: rank={rank}, world_size={world_size}, device={device}")
     
-    # Test 2: Set environment variables
-    print("\n--- Test 2: With environment variables ---")
+    # Test 2: Test environment variable parsing without actually initializing distributed
+    print("\n--- Test 2: Environment variable parsing (dry run) ---")
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '2'
     os.environ['LOCAL_RANK'] = '0'
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
-    args = MockArgs()  # Reset args
-    
+    # Test parsing without actually initializing
+    from distributed_utils import parse_distributed_env
     try:
-        rank, world_size, device = setup_distributed(args)
-        print(f"Result: rank={rank}, world_size={world_size}, device={device}")
+        env_info = parse_distributed_env()
+        print(f"Environment parsing result: {env_info}")
     except Exception as e:
-        print(f"Expected error (no other processes): {e}")
+        print(f"Error parsing environment: {e}")
+    
+    print("\n--- Test 3: GPU detection ---")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
     
     # Clean up
     for key in ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT']:

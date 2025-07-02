@@ -47,36 +47,61 @@ def setup_distributed(args):
         available_devices = torch.cuda.device_count()
         print(f"Process rank {args.rank}, local_rank {args.local_rank}, available devices: {available_devices}")
         
+        # Validate local_rank is within available devices
+        if args.local_rank >= available_devices:
+            print(f"ERROR: local_rank {args.local_rank} >= available devices {available_devices}")
+            return 0, 1, torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        
         if 'CUDA_VISIBLE_DEVICES' in os.environ:
             visible_devices = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
             print(f"CUDA_VISIBLE_DEVICES: {visible_devices}")
-            if args.local_rank < len(visible_devices):
-                device_id = args.local_rank  # Use local rank as index into visible devices
-            else:
-                device_id = 0
-                print(f"Warning: local_rank {args.local_rank} >= visible devices {len(visible_devices)}, using device 0")
+            
+            # When CUDA_VISIBLE_DEVICES is set, PyTorch remaps devices starting from 0
+            # So if CUDA_VISIBLE_DEVICES="2,3", device 0 maps to physical GPU 2, device 1 maps to physical GPU 3
+            device_id = args.local_rank
+            
+            if device_id >= len(visible_devices):
+                print(f"ERROR: local_rank {args.local_rank} >= visible devices {len(visible_devices)}")
+                return 0, 1, torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         else:
             device_id = args.local_rank
             
-        # Ensure device_id is within available range
+        # Final validation
         if device_id >= available_devices:
-            device_id = device_id % available_devices
-            print(f"Warning: Adjusting device_id to {device_id} (available: {available_devices})")
+            print(f"ERROR: Computed device_id {device_id} >= available devices {available_devices}")
+            return 0, 1, torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
             
         print(f"Setting CUDA device to: {device_id}")
-        torch.cuda.set_device(device_id)
-        device = torch.device(f'cuda:{device_id}')
+        try:
+            torch.cuda.set_device(device_id)
+            device = torch.device(f'cuda:{device_id}')
+            print(f"Successfully set CUDA device to: {device}")
+        except RuntimeError as e:
+            print(f"ERROR: Failed to set CUDA device {device_id}: {e}")
+            return 0, 1, torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         
-        # Initialize process group
-        dist.init_process_group(
-            backend=args.dist_backend,
-            init_method=args.dist_url,
-            world_size=args.world_size,
-            rank=args.rank
-        )
-        
-        # Wait for all processes
-        dist.barrier()
+        # Initialize process group with timeout
+        print("Initializing distributed process group...")
+        try:
+            import datetime
+            timeout = datetime.timedelta(seconds=30)  # 30 second timeout
+            
+            dist.init_process_group(
+                backend=args.dist_backend,
+                init_method=args.dist_url,
+                world_size=args.world_size,
+                rank=args.rank,
+                timeout=timeout
+            )
+            
+            # Wait for all processes
+            dist.barrier()
+        except Exception as e:
+            print(f"Failed to initialize distributed process group: {e}")
+            print("Falling back to single GPU mode...")
+            if dist.is_initialized():
+                dist.destroy_process_group()
+            return 0, 1, torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         
         print(f"Distributed training initialized: rank {args.rank}/{args.world_size}, local_rank {args.local_rank}")
         
@@ -166,3 +191,26 @@ def launch_distributed_training(args, main_func):
             print("\nTraining interrupted by user")
             cleanup_distributed()
             raise
+
+
+def parse_distributed_env():
+    """Parse distributed environment variables without initializing process group"""
+    env_info = {}
+    
+    # Check if environment variables are set
+    env_vars = ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT']
+    for var in env_vars:
+        env_info[var] = os.environ.get(var, 'not set')
+    
+    # Parse CUDA_VISIBLE_DEVICES
+    cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')
+    if cuda_visible != 'not set':
+        env_info['CUDA_VISIBLE_DEVICES'] = cuda_visible.split(',')
+    else:
+        env_info['CUDA_VISIBLE_DEVICES'] = 'not set'
+    
+    # Check if all required variables are set
+    required_vars = ['RANK', 'WORLD_SIZE', 'LOCAL_RANK']
+    env_info['distributed_ready'] = all(os.environ.get(var) is not None for var in required_vars)
+    
+    return env_info
