@@ -169,31 +169,6 @@ def setup_diffusion_and_scaler(config, device, args):
     return betas, t_intervals, scaler
 
 
-def save_checkpoint(model, optimizer, scaler, step, epoch, loss, config, path):
-    """Save model checkpoint"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scaler_state_dict': scaler.state_dict(),
-        'step': step,
-        'epoch': epoch,
-        'loss': loss,
-        'config': config
-    }
-    torch.save(checkpoint, path)
-    logging.info(f"Checkpoint saved: {path}")
-
-
-def load_checkpoint(path, model, optimizer, scaler, device):
-    """Load model checkpoint"""
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    return checkpoint['epoch'], checkpoint['step'], checkpoint['loss']
-
-
 def validate_model(model, val_loader, device, betas, t_intervals):
     """Simple validation function"""
     model.eval()
@@ -239,23 +214,10 @@ def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, u
             targets = batch['target'][:1].unsqueeze(1).to(device)
             target_idx = batch['target_idx'][0].item()
             
-            # Generate sample using Fast-DDPM
-            # Create noise with same shape as target
-            x_T = torch.randn_like(targets)
-            
-            # Get sampling sequence (use subset of timesteps for faster sampling)
-            seq = list(range(0, len(t_intervals), max(1, len(t_intervals) // 10)))
-            if len(seq) == 0 or seq[-1] != len(t_intervals) - 1:
-                seq.append(len(t_intervals) - 1)
-            
-            # Sample using generalized steps
-            samples, _ = generalized_steps_3d(x_T, seq, model, betas, eta=0.0)
-            generated = samples[-1]  # Final sample
-            
+            # Simple logging without generation for now - just log target and inputs
             # Convert to numpy and create visualizations
             inputs_np = inputs[0].cpu().numpy()  # Shape: (4, H, W, D)
             targets_np = targets[0, 0].cpu().numpy()  # Shape: (H, W, D)
-            generated_np = generated[0, 0].cpu().numpy()  # Shape: (H, W, D)
             
             # Get middle slices for visualization
             mid_slice = targets_np.shape[2] // 2
@@ -271,19 +233,15 @@ def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, u
                 if i != target_idx:  # Don't log the target modality from input
                     img_slice = inputs_np[i, :, :, mid_slice]
                     # Normalize for visualization
-                    img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+                    if img_slice.max() > img_slice.min():
+                        img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min())
                     images_to_log[f"input/{mod_name}"] = wandb.Image(img_slice, caption=f"Input {mod_name}")
             
-            # Log target and generated
+            # Log target
             target_slice = targets_np[:, :, mid_slice]
-            generated_slice = generated_np[:, :, mid_slice]
-            
-            # Normalize for visualization
-            target_slice = (target_slice - target_slice.min()) / (target_slice.max() - target_slice.min() + 1e-8)
-            generated_slice = (generated_slice - generated_slice.min()) / (generated_slice.max() - generated_slice.min() + 1e-8)
-            
+            if target_slice.max() > target_slice.min():
+                target_slice = (target_slice - target_slice.min()) / (target_slice.max() - target_slice.min())
             images_to_log[f"target/{target_name}"] = wandb.Image(target_slice, caption=f"Target {target_name}")
-            images_to_log[f"generated/{target_name}"] = wandb.Image(generated_slice, caption=f"Generated {target_name}")
             
             # Log all images
             wandb.log(images_to_log, step=step)
@@ -291,7 +249,7 @@ def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, u
             logging.info(f"Sample images logged to W&B at step {step}")
             
     except Exception as e:
-        logging.warning(f"Failed to generate and log sample images: {e}")
+        logging.warning(f"Failed to generate and log sample images: {str(e)}")
     finally:
         model.train()
 
@@ -314,18 +272,8 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
     elif args.use_wandb and not WANDB_AVAILABLE:
         logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
     
-    # Resume training if requested
-    start_epoch = 0
-    start_step = 0
-    if args.resume and args.resume_path and os.path.exists(args.resume_path):
-        logging.info(f"Resuming from checkpoint: {args.resume_path}")
-        start_epoch, start_step, _ = load_checkpoint(
-            args.resume_path, model, optimizer, scaler, device
-        )
-        logging.info(f"Resumed from epoch {start_epoch}, step {start_step}")
-    
     # Training parameters
-    global_step = start_step
+    global_step = 0
     best_val_loss = float('inf')
     log_dir = os.path.join(args.exp, 'logs', args.doc)
     os.makedirs(log_dir, exist_ok=True)
@@ -337,7 +285,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
         logging.info(f"W&B sampling every {args.sample_every} steps")
     
     # Training loop
-    for epoch in range(start_epoch, config.training.epochs):
+    for epoch in range(config.training.epochs):
         model.train()
         epoch_loss = 0.0
         
@@ -415,13 +363,6 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                            f'Target: {target_idx}, '
                            f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
             
-            # Save checkpoint periodically
-            if global_step % 2000 == 0:
-                save_checkpoint(
-                    model, optimizer, scaler, global_step, epoch, loss.item(), 
-                    config, os.path.join(log_dir, f'ckpt_{global_step}.pth')
-                )
-            
             # Generate and log sample images
             if global_step % args.sample_every == 0 and global_step > 0:
                 sample_and_log_images(model, val_loader, device, betas, t_intervals, global_step, use_wandb)
@@ -436,10 +377,6 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    save_checkpoint(
-                        model, optimizer, scaler, global_step, epoch, val_loss,
-                        config, os.path.join(log_dir, 'best_model.pth')
-                    )
                     logging.info(f'New best validation loss: {val_loss:.6f}')
                     if use_wandb:
                         wandb.run.summary["best_val_loss"] = val_loss
@@ -457,13 +394,6 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 'epoch/learning_rate': optimizer.param_groups[0]["lr"],
                 'epoch/epoch': epoch + 1,
             }, step=global_step)
-        
-        # Save checkpoint every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            save_checkpoint(
-                model, optimizer, scaler, global_step, epoch, avg_loss,
-                config, os.path.join(log_dir, f'ckpt_epoch_{epoch+1}.pth')
-            )
     
     logging.info("Training completed!")
     logging.info(f"Best validation loss: {best_val_loss:.6f}")
