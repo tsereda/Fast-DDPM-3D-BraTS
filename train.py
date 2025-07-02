@@ -23,6 +23,7 @@ sys.path.append('..')
 from data.brain_3d_unified import BraTS3DUnifiedDataset
 from models.fast_ddpm_3d import FastDDPM3D
 from functions.losses import brats_4to1_loss
+from functions.denoising_3d import generalized_steps_3d
 
 # Minimal training utils
 from training_utils import load_config, get_beta_schedule, get_timestep_schedule
@@ -52,6 +53,7 @@ def parse_args():
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
     parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity (username or team)')
+    parser.add_argument('--sample_every', type=int, default=2000, help='Generate and log sample images to W&B every N steps')
 
     return parser.parse_args()
 
@@ -222,6 +224,78 @@ def validate_model(model, val_loader, device, betas, t_intervals):
     return total_loss / max(num_batches, 1)
 
 
+def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, use_wandb):
+    """Generate sample images and log to W&B"""
+    if not use_wandb:
+        return
+        
+    model.eval()
+    
+    try:
+        with torch.no_grad():
+            # Get a single validation batch for sampling
+            batch = next(iter(val_loader))
+            inputs = batch['input'][:1].to(device)  # Take only first sample
+            targets = batch['target'][:1].unsqueeze(1).to(device)
+            target_idx = batch['target_idx'][0].item()
+            
+            # Generate sample using Fast-DDPM
+            # Create noise with same shape as target
+            x_T = torch.randn_like(targets)
+            
+            # Get sampling sequence (use subset of timesteps for faster sampling)
+            seq = list(range(0, len(t_intervals), max(1, len(t_intervals) // 10)))
+            if len(seq) == 0 or seq[-1] != len(t_intervals) - 1:
+                seq.append(len(t_intervals) - 1)
+            
+            # Sample using generalized steps
+            samples, _ = generalized_steps_3d(x_T, seq, model, betas, eta=0.0)
+            generated = samples[-1]  # Final sample
+            
+            # Convert to numpy and create visualizations
+            inputs_np = inputs[0].cpu().numpy()  # Shape: (4, H, W, D)
+            targets_np = targets[0, 0].cpu().numpy()  # Shape: (H, W, D)
+            generated_np = generated[0, 0].cpu().numpy()  # Shape: (H, W, D)
+            
+            # Get middle slices for visualization
+            mid_slice = targets_np.shape[2] // 2
+            
+            # Create wandb images (2D slices)
+            modality_names = ['t1n', 't1c', 't2w', 't2f']
+            target_name = modality_names[target_idx]
+            
+            images_to_log = {}
+            
+            # Log input modalities (middle slice)
+            for i, mod_name in enumerate(modality_names):
+                if i != target_idx:  # Don't log the target modality from input
+                    img_slice = inputs_np[i, :, :, mid_slice]
+                    # Normalize for visualization
+                    img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+                    images_to_log[f"input/{mod_name}"] = wandb.Image(img_slice, caption=f"Input {mod_name}")
+            
+            # Log target and generated
+            target_slice = targets_np[:, :, mid_slice]
+            generated_slice = generated_np[:, :, mid_slice]
+            
+            # Normalize for visualization
+            target_slice = (target_slice - target_slice.min()) / (target_slice.max() - target_slice.min() + 1e-8)
+            generated_slice = (generated_slice - generated_slice.min()) / (generated_slice.max() - generated_slice.min() + 1e-8)
+            
+            images_to_log[f"target/{target_name}"] = wandb.Image(target_slice, caption=f"Target {target_name}")
+            images_to_log[f"generated/{target_name}"] = wandb.Image(generated_slice, caption=f"Generated {target_name}")
+            
+            # Log all images
+            wandb.log(images_to_log, step=step)
+            
+            logging.info(f"Sample images logged to W&B at step {step}")
+            
+    except Exception as e:
+        logging.warning(f"Failed to generate and log sample images: {e}")
+    finally:
+        model.train()
+
+
 def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler, 
                  betas, t_intervals, config, args, device):
     """Simplified training loop"""
@@ -259,6 +333,8 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
     logging.info("Starting training...")
     logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
     logging.info(f"Batch size: {config.training.batch_size}")
+    if use_wandb:
+        logging.info(f"W&B sampling every {args.sample_every} steps")
     
     # Training loop
     for epoch in range(start_epoch, config.training.epochs):
@@ -345,6 +421,10 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     model, optimizer, scaler, global_step, epoch, loss.item(), 
                     config, os.path.join(log_dir, f'ckpt_{global_step}.pth')
                 )
+            
+            # Generate and log sample images
+            if global_step % args.sample_every == 0 and global_step > 0:
+                sample_and_log_images(model, val_loader, device, betas, t_intervals, global_step, use_wandb)
             
             # Validation
             if global_step % 1000 == 0:
