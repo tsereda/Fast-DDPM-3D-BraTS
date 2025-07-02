@@ -186,6 +186,16 @@ class BraTS3DUnifiedDataset(Dataset):
         random.seed(hash((case_dir.name, crop_idx)) % (2**32))
         crop_coords = self._get_random_crop_coords(volume_shape)
         
+        # Debug print for first few samples to show original vs crop size
+        if idx < 3:  # Only print for first 3 samples to avoid spam
+            print(f"\n=== Dataset Debug Info (Sample {idx}) ===")
+            print(f"Case: {case_dir.name}")
+            print(f"Original volume shape: {volume_shape}")
+            print(f"Crop size: {self.crop_size}")
+            print(f"Crop coordinates: {crop_coords}")
+            print(f"Available modalities: {available_modalities}")
+            print(f"=== End Dataset Debug Info ===\n")
+        
         # Extract crops and normalize each modality
         cropped_volumes = {}
         for modality in self.modalities:

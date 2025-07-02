@@ -31,7 +31,7 @@ diffusion:
     num_diffusion_timesteps: 1000
 
 training:
-    batch_size: 2                  # Can be larger with cropping
+    batch_size: 4                  # Can be larger with cropping
     gradient_accumulation_steps: 2   # Effective batch size = batch_size * gradient_accumulation_steps
     epochs: 1000
     learning_rate: 0.0001
@@ -57,7 +57,7 @@ sampling:
     timesteps: 10                   # Fast-DDPM: only 10 steps
     scheduler_type: "uniform"       # or "non-uniform"
     eta: 0.0                       # DDIM parameter
-    batch_size: 2
+    batch_size: 4
     
     # Noise initialization for [0,1] range
     init_type: "gaussian"          # Use Gaussian noise

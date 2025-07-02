@@ -345,6 +345,19 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
             targets = batch['target'].unsqueeze(1).to(device)
             target_idx = batch['target_idx'][0].item()
             
+            # Print original and crop sizes (only for first batch of first epoch)
+            if epoch == 0 and batch_idx == 0:
+                print(f"\n=== Data Size Information ===")
+                print(f"Input tensor shape: {inputs.shape}")  # [batch_size, 4, H, W, D]
+                print(f"Target tensor shape: {targets.shape}")  # [batch_size, 1, H, W, D]
+                print(f"Crop size used: {inputs.shape[2:]}")  # (H, W, D)
+                print(f"Case name: {batch['case_name'][0]}")
+                print(f"Target modality: {batch['target_modality'][0]}")
+                print(f"Available modalities: {batch['available_modalities'][0]}")
+                crop_coords = batch['crop_coords'][0]
+                print(f"Crop coordinates: {crop_coords}")
+                print(f"=== End Data Size Information ===\n")
+            
             # Skip invalid data
             if torch.isnan(inputs).any() or torch.isnan(targets).any():
                 logging.warning(f"Skipping batch {batch_idx} due to NaN values")
