@@ -78,7 +78,7 @@ spec:
             --use_ddp \
             --port auto \
             --use_wandb \
-            --sample_every 1 \
+            --sample_every 50 \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
 
