@@ -29,13 +29,13 @@ class BraTS3DUnifiedDataset(Dataset):
         # Standard BraTS modalities
         self.modalities = ['t1n', 't1c', 't2w', 't2f']
         
-        # Global normalization statistics (should be pre-computed from training set)
-        # These are typical values for BraTS dataset - in practice, compute from full training set
+        # Global normalization statistics computed from actual training data
+        # Updated with actual statistics from compute_normalization_stats.py
         self.global_stats = {
-            't1n': {'min': 0.0, 'max': 4000.0},
-            't1c': {'min': 0.0, 'max': 5000.0}, 
-            't2w': {'min': 0.0, 'max': 6000.0},
-            't2f': {'min': 0.0, 'max': 7000.0}
+            't1n': {'min': 0.0, 'max': 4900.4},
+            't1c': {'min': 0.0, 'max': 9532.3},
+            't2w': {'min': 0.0, 'max': 5373.3},
+            't2f': {'min': 0.0, 'max': 3201.0}
         }
         
         # Find all case directories
