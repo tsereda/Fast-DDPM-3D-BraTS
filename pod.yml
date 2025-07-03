@@ -92,6 +92,7 @@ spec:
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
             --use_wandb \
             --sample_every 50 \
+            --batch_size 4 \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
             --doc pod-training-$(date +%Y%m%d-%H%M%S)
