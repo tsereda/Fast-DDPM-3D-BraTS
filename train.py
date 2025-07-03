@@ -194,6 +194,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
     
     logging.info("Starting training...")
     logging.info(f"Batch size: {config.training.batch_size}")
+    logging.info(f"Log every: {config.training.log_every_n_steps} steps")
     logging.info(f"Mixed precision: {not args.no_mixed_precision}")
     
     # Test W&B logging only
@@ -317,8 +318,11 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                         )
                 
                 # Periodic logging
-                if global_step % (args.log_every_n_steps * 10) == 0:
-                    logging.info(f'Epoch {epoch+1}, Step {global_step} - Loss: {loss.item():.6f}')
+                if global_step % config.training.log_every_n_steps == 0:
+                    logging.info(f'Epoch {epoch+1}, Step {global_step} - Loss: {loss.item():.6f}, '
+                               f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
+                               f'Batch size: {config.training.batch_size}, '
+                               f'Target: {target_idx}')
                 
                 # Early stopping for debugging
                 if args.debug_early_stop and batch_idx >= args.debug_early_stop:
@@ -371,7 +375,8 @@ def parse_args():
     parser.add_argument('--resume', action='store_true', help='Resume training')
     parser.add_argument('--resume_path', type=str, help='Path to checkpoint to resume from')
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
-    parser.add_argument('--log_every_n_steps', type=int, default=1, help='Log training progress every N steps')
+    parser.add_argument('--log_every_n_steps', type=int, default=None, help='Log training progress every N steps (overrides config)')
+    parser.add_argument('--batch_size', type=int, default=None, help='Batch size (overrides config)')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
     parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity')
@@ -555,6 +560,15 @@ def main():
     except FileNotFoundError:
         logging.error(f"Config file not found: {args.config}")
         sys.exit(1)
+    
+    # Override config values with command line arguments
+    if args.batch_size is not None:
+        config.training.batch_size = args.batch_size
+        logging.info(f"Overriding batch size to: {args.batch_size}")
+    
+    if args.log_every_n_steps is not None:
+        config.training.log_every_n_steps = args.log_every_n_steps
+        logging.info(f"Overriding log frequency to every: {args.log_every_n_steps} steps")
     
     config.device = device
     
