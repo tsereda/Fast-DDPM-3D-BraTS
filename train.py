@@ -319,6 +319,14 @@ def parse_args():
     # Training options
     parser.add_argument('--no_mixed_precision', action='store_true', help='Disable mixed precision training')
     parser.add_argument('--clip_norm', type=float, default=1.0, help='Gradient clipping norm')
+    
+    # Data processing options
+    parser.add_argument('--use_full_volumes', action='store_true', 
+                       help='Use full volumes instead of random patches')
+    parser.add_argument('--input_size', nargs=3, type=int, default=[80, 80, 80],
+                       help='Input size for full volumes (default: 80 80 80)')
+    parser.add_argument('--patch_size', nargs=3, type=int, default=[80, 80, 80],
+                       help='Patch size for patch-based training (default: 80 80 80)')
 
     return parser.parse_args()
 
@@ -330,14 +338,32 @@ def setup_datasets(args, config):
     if not os.path.exists(args.data_root):
         raise FileNotFoundError(f"Data root not found: {args.data_root}")
     
+    # Determine sizes based on mode
+    if args.use_full_volumes:
+        input_size = tuple(args.input_size)
+        crop_size = (64, 64, 64)  # Not used in full volume mode
+        mode_info = f"full volumes ({input_size})"
+    else:
+        input_size = tuple(args.patch_size)
+        crop_size = tuple(args.patch_size)
+        mode_info = f"patches ({crop_size})"
+    
+    logging.info(f"Data processing mode: {mode_info}")
+    
     train_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
-        phase='train'
+        phase='train',
+        crop_size=crop_size,
+        use_full_volumes=args.use_full_volumes,
+        input_size=input_size
     )
     
     val_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
-        phase='val'
+        phase='val',
+        crop_size=crop_size,
+        use_full_volumes=args.use_full_volumes,
+        input_size=input_size
     )
     
     if args.debug:
@@ -362,14 +388,14 @@ def custom_collate_fn(batch):
         if key in ['available_modalities', 'successfully_loaded_modalities']:
             # Keep list fields as lists of lists
             collated[key] = [item[key] for item in batch]
-        elif key in ['case_name', 'target_modality']:
+        elif key in ['case_name', 'target_modality', 'processing_mode']:
             # String fields - keep as list of strings
             collated[key] = [item[key] for item in batch]
         elif key in ['target_idx']:
             # Integer fields - convert to tensor
             collated[key] = torch.tensor([item[key] for item in batch])
         elif key == 'crop_coords':
-            # Keep as list of tuples
+            # Keep as list of tuples (may be None for full volumes)
             collated[key] = [item[key] for item in batch]
         else:
             # Tensor fields - use default stacking
@@ -498,6 +524,12 @@ def main():
     if args.log_every_n_steps is not None:
         config.training.log_every_n_steps = args.log_every_n_steps
         logging.info(f"Overriding log frequency to every: {args.log_every_n_steps} steps")
+    
+    # Log data processing configuration
+    if args.use_full_volumes:
+        logging.info(f"Using full volume mode with input size: {tuple(args.input_size)}")
+    else:
+        logging.info(f"Using patch mode with patch size: {tuple(args.patch_size)}")
     
     config.device = device
     

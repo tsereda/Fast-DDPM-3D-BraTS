@@ -17,12 +17,15 @@ class BraTS3DUnifiedDataset(Dataset):
     """
     
     def __init__(self, data_root, phase='train', crop_size=(64, 64, 64), 
-                 min_input_modalities=3, crops_per_volume=4):
+                 min_input_modalities=3, crops_per_volume=4, use_full_volumes=False,
+                 input_size=(80, 80, 80)):
         self.data_root = Path(data_root)
         self.phase = phase
         self.crop_size = tuple(crop_size)
+        self.input_size = tuple(input_size)
         self.min_input_modalities = min_input_modalities
         self.crops_per_volume = crops_per_volume
+        self.use_full_volumes = use_full_volumes
         
         # Standard BraTS modalities
         self.modalities = ['t1n', 't1c', 't2w', 't2f']
@@ -41,13 +44,20 @@ class BraTS3DUnifiedDataset(Dataset):
         if len(self.cases) == 0:
             raise ValueError(f"No valid cases found in {data_root}")
         
-        # Create multiple crops per case for data augmentation
+        # Create multiple crops per case for data augmentation (patches only)
         self.samples = []
-        for case in self.cases:
-            for crop_idx in range(self.crops_per_volume):
-                self.samples.append((case, crop_idx))
+        if self.use_full_volumes:
+            # One sample per case for full volumes
+            for case in self.cases:
+                self.samples.append((case, 0))
+        else:
+            # Multiple crops per case for patch-based training
+            for case in self.cases:
+                for crop_idx in range(self.crops_per_volume):
+                    self.samples.append((case, crop_idx))
         
-        logger.info(f"Found {len(self.cases)} cases, {len(self.samples)} total samples for {phase} phase")
+        mode_str = "full volumes" if self.use_full_volumes else "patches"
+        logger.info(f"Found {len(self.cases)} cases, {len(self.samples)} total samples for {phase} phase ({mode_str})")
     
     def _find_cases(self):
         """Find all valid BraTS case directories"""
@@ -104,6 +114,25 @@ class BraTS3DUnifiedDataset(Dataset):
         except Exception as e:
             logger.error(f"Error loading {filepath}: {e}")
             return None, None
+    
+    def _get_processing_size(self):
+        """Get the target size for processing"""
+        if self.use_full_volumes:
+            return self.input_size
+        else:
+            return self.crop_size
+    
+    def _resize_volume(self, volume, target_size):
+        """Resize volume to target size using trilinear interpolation"""
+        from scipy.ndimage import zoom
+        
+        # Calculate zoom factors for each dimension
+        zoom_factors = [target_size[i] / volume.shape[i] for i in range(3)]
+        
+        # Resize using trilinear interpolation
+        resized = zoom(volume, zoom_factors, order=1)  # order=1 for trilinear
+        
+        return resized
     
     def _get_random_crop_coords(self, volume_shape):
         """Get random crop coordinates that fit within volume"""
@@ -201,22 +230,27 @@ class BraTS3DUnifiedDataset(Dataset):
                     volume_shape = (240, 240, 155)
                 modality_volumes[modality] = np.zeros(volume_shape, dtype=np.float32)
         
-        # Generate consistent random crop coordinates for all modalities
-        random.seed(hash((case_dir.name, crop_idx)) % (2**32))
-        crop_coords = self._get_random_crop_coords(volume_shape)
+        # Process volumes based on mode
+        target_size = self._get_processing_size()
+        processed_volumes = {}
         
-        # Extract crops and normalize each modality
-        cropped_volumes = {}
-        for modality in self.modalities:
-            volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
+        if self.use_full_volumes:
+            # Full volume mode: resize to input_size
+            for modality in self.modalities:
+                volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
+                resized = self._resize_volume(volume, target_size)
+                normalized = self._normalize_volume_0_1(resized, modality=modality)
+                processed_volumes[modality] = torch.FloatTensor(normalized)
+        else:
+            # Patch mode: extract random crops
+            random.seed(hash((case_dir.name, crop_idx)) % (2**32))
+            crop_coords = self._get_random_crop_coords(volume_shape)
             
-            # Extract crop using same coordinates
-            cropped = self._extract_crop(volume, crop_coords)
-            
-            # Normalize to [0, 1]
-            normalized = self._normalize_volume_0_1(cropped, modality=modality)
-            
-            cropped_volumes[modality] = torch.FloatTensor(normalized)
+            for modality in self.modalities:
+                volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
+                cropped = self._extract_crop(volume, crop_coords)
+                normalized = self._normalize_volume_0_1(cropped, modality=modality)
+                processed_volumes[modality] = torch.FloatTensor(normalized)
         
         # Select target modality from successfully loaded modalities
         if self.phase == 'train' and len(successfully_loaded_modalities) > 0:
@@ -227,10 +261,10 @@ class BraTS3DUnifiedDataset(Dataset):
             target_modality = self.modalities[0]  # Fallback
         
         target_idx = self.modalities.index(target_modality)
-        target_volume = cropped_volumes[target_modality]
+        target_volume = processed_volumes[target_modality]
         
         # FIXED: Create input with target modality replaced by ZEROS
-        input_modalities = torch.stack([cropped_volumes[mod] for mod in self.modalities])
+        input_modalities = torch.stack([processed_volumes[mod] for mod in self.modalities])
         input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
         
         # FIXED: Correct available_modalities reporting
@@ -246,8 +280,8 @@ class BraTS3DUnifiedDataset(Dataset):
             display_available_modalities = available_non_target_modalities.copy()
         
         # Validation
-        assert input_modalities.shape == (4, *self.crop_size)
-        assert target_volume.shape == self.crop_size
+        assert input_modalities.shape == (4, *target_size)
+        assert target_volume.shape == target_size
         assert torch.all(input_modalities >= 0) and torch.all(input_modalities <= 1)
         assert torch.all(target_volume >= 0) and torch.all(target_volume <= 1)
         
@@ -259,5 +293,6 @@ class BraTS3DUnifiedDataset(Dataset):
             'target_modality': target_modality,
             'available_modalities': display_available_modalities,  # FIXED: Now correctly shows non-target modalities
             'successfully_loaded_modalities': successfully_loaded_modalities,  # NEW: Shows all loaded modalities
-            'crop_coords': crop_coords
+            'crop_coords': crop_coords if not self.use_full_volumes else None,
+            'processing_mode': 'full_volume' if self.use_full_volumes else 'patch'
         }
