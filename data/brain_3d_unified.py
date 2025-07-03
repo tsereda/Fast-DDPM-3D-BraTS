@@ -194,8 +194,15 @@ class BraTS3DUnifiedDataset(Dataset):
         successful_modalities = []
         volume_shape = None
         
+        # Debug logging for this specific case
+        if "BraTS-GLI-00811-000" in case_dir.name:
+            logger.info(f"🔍 DEBUG: Loading modalities for {case_dir.name}")
+        
         for modality in self.modalities:
             modality_file = self._find_modality_file(case_dir, modality)
+            
+            if "BraTS-GLI-00811-000" in case_dir.name:
+                logger.info(f"🔍 DEBUG: {modality} -> {modality_file}")
             
             if modality_file:
                 volume, affine = self._load_full_volume(modality_file)
@@ -204,6 +211,18 @@ class BraTS3DUnifiedDataset(Dataset):
                     successful_modalities.append(modality)
                     if volume_shape is None:
                         volume_shape = volume.shape
+                    
+                    if "BraTS-GLI-00811-000" in case_dir.name:
+                        logger.info(f"🔍 DEBUG: {modality} loaded successfully, shape: {volume.shape}")
+                else:
+                    if "BraTS-GLI-00811-000" in case_dir.name:
+                        logger.warning(f"🔍 DEBUG: {modality} failed to load (returned None)")
+            else:
+                if "BraTS-GLI-00811-000" in case_dir.name:
+                    logger.warning(f"🔍 DEBUG: {modality} file not found")
+        
+        if "BraTS-GLI-00811-000" in case_dir.name:
+            logger.info(f"🔍 DEBUG: Final successful_modalities: {successful_modalities}")
         
         # Ensure we have enough modalities to proceed
         if len(successful_modalities) < self.min_input_modalities:
@@ -251,14 +270,12 @@ class BraTS3DUnifiedDataset(Dataset):
         # 🔥 FIXED: Available modalities are all successfully loaded modalities except target
         input_available_modalities = [mod for mod in successful_modalities if mod != target_modality]
         
-        # 🔥 CRITICAL FIX: Create input with target modality replaced by Gaussian noise
+        # 🔥 CRITICAL FIX: Create input with target modality replaced by ZEROS (not noise)
         input_modalities = torch.stack([cropped_volumes[mod] for mod in self.modalities])
         
-        # Replace target modality with Gaussian noise instead of zeros
-        # Use same spatial dimensions but with noise sampled from N(0.5, 0.1) for [0,1] range
-        noise = torch.normal(mean=0.5, std=0.1, size=input_modalities[target_idx].shape)
-        noise = torch.clamp(noise, 0.0, 1.0)  # Ensure noise stays in [0,1] range
-        input_modalities[target_idx] = noise
+        # Replace target modality with ZEROS instead of Gaussian noise
+        # Gaussian noise was causing worse gradient explosion (40k+ vs 10k)
+        input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
         
         # Validation
         assert input_modalities.shape == (4, *self.crop_size)
@@ -267,7 +284,7 @@ class BraTS3DUnifiedDataset(Dataset):
         assert torch.all(target_volume >= 0) and torch.all(target_volume <= 1)
         
         return {
-            'input': input_modalities,      # [4, H, W, D] with target as Gaussian noise, range [0,1]
+            'input': input_modalities,      # [4, H, W, D] with target as ZEROS, range [0,1]
             'target': target_volume,        # [H, W, D] target modality, range [0,1]
             'target_idx': target_idx,
             'case_name': case_dir.name,
