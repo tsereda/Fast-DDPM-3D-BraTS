@@ -38,8 +38,8 @@ def test_model_only():
         # Import model
         from models.fast_ddpm_3d import FastDDPM3D
         
-        # Create minimal config for testing
-        config = type('Config', (), {
+        # Create minimal config for testing with proper structure
+        model_config = type('ModelConfig', (), {
             'ch': 32,                    # Reduced from typical 64
             'num_res_blocks': 1,         # Minimal blocks
             'attn_resolutions': [],      # No attention for now
@@ -50,6 +50,10 @@ def test_model_only():
             'dropout': 0.0,             # No dropout for cleaner test
             'resamp_with_conv': True,
             'num_timesteps': 10,        # Few timesteps for testing
+        })()
+        
+        config = type('Config', (), {
+            'model': model_config
         })()
         
         print("Creating model...")

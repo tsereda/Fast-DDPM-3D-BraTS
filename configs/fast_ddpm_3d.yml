@@ -34,9 +34,9 @@ training:
     batch_size: 2                 # Can be larger with cropping
     gradient_accumulation_steps: 2   # Effective batch size = batch_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.0002          # Increased LR for better convergence
+    learning_rate: 0.00001         # 🔥 FIXED: Reduced from 0.0002 to 1e-5 for 3D stability
     weight_decay: 0.0
-    gradient_clip: 1.0
+    gradient_clip: 0.1             # 🔥 FIXED: Much stricter gradient clipping
     loss_type: "mse"               # Professor: Use MSE loss
     
     # Checkpointing
@@ -46,7 +46,7 @@ training:
 
 optim:
     optimizer: "Adam"
-    lr: 0.0002                     # Match training.learning_rate
+    lr: 0.00001                    # 🔥 FIXED: Match training.learning_rate (1e-5)
     beta1: 0.9
     weight_decay: 0.0
     amsgrad: false
