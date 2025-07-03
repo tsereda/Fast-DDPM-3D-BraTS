@@ -38,71 +38,20 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
-def debug_timestep_sampling(t_intervals, batch_size, method="antithetic"):
-    """Debug function to analyze timestep sampling behavior"""
-    print(f"\n🔍 DEBUG: Timestep Sampling Analysis")
-    print(f"Method: {method}")
-    print(f"t_intervals shape: {t_intervals.shape}")
-    print(f"t_intervals range: [{t_intervals.min()}, {t_intervals.max()}]")
-    print(f"t_intervals values: {t_intervals.cpu().numpy()}")
-    
+def sample_timesteps(t_intervals, batch_size, method="antithetic"):
+    """Sample timesteps for training"""
     if method == "antithetic":
         n = batch_size
         idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
         idx_2 = len(t_intervals) - idx_1 - 1
         idx = torch.cat([idx_1, idx_2], dim=0)[:n]
         t = t_intervals[idx]
-        
-        print(f"Antithetic sampling:")
-        print(f"  idx_1: {idx_1.cpu().numpy()}")
-        print(f"  idx_2: {idx_2.cpu().numpy()}")
-        print(f"  final idx: {idx.cpu().numpy()}")
-        print(f"  final t values: {t.cpu().numpy()}")
-        print(f"  t range: [{t.min()}, {t.max()}]")
-        
     elif method == "simple":
         idx = torch.randint(0, len(t_intervals), size=(batch_size,))
         t = t_intervals[idx]
-        
-        print(f"Simple sampling:")
-        print(f"  idx: {idx.cpu().numpy()}")
-        print(f"  t values: {t.cpu().numpy()}")
-        print(f"  t range: [{t.min()}, {t.max()}]")
     
     return t
 
-
-def debug_loss_components_detailed(model, inputs, targets, t, e, betas, target_idx):
-    """Detailed debugging of loss computation"""
-    print(f"\n🔍 DEBUG: Loss Computation Details")
-    print(f"Inputs shape: {inputs.shape}, range: [{inputs.min():.3f}, {inputs.max():.3f}]")
-    print(f"Targets shape: {targets.shape}, range: [{targets.min():.3f}, {targets.max():.3f}]")
-    print(f"Timesteps: {t.cpu().numpy()}")
-    print(f"Noise range: [{e.min():.3f}, {e.max():.3f}]")
-    print(f"Target idx: {target_idx}")
-    
-    # Step-by-step loss computation
-    a = (1-betas).cumprod(dim=0)
-    print(f"Alpha cumprod range: [{a.min():.6f}, {a.max():.6f}]")
-    
-    a = torch.clamp(a, min=1e-8, max=1.0)
-    a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
-    print(f"Selected alpha: {a.squeeze().cpu().numpy()}")
-    
-    # Check noise scaling
-    e_scaled = e * 0.01
-    print(f"Scaled noise range: [{e_scaled.min():.6f}, {e_scaled.max():.6f}]")
-    
-    # Forward diffusion
-    x_noisy = targets * a.sqrt() + e_scaled * (1.0 - a).sqrt()
-    print(f"Noisy input range: [{x_noisy.min():.3f}, {x_noisy.max():.3f}]")
-    
-    # Model input preparation
-    model_input = inputs.clone()
-    model_input[:, target_idx:target_idx+1] = x_noisy
-    print(f"Model input range: [{model_input.min():.3f}, {model_input.max():.3f}]")
-    
-    return model_input, e_scaled
 
 
 def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4):
@@ -225,53 +174,6 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
     model.train()
 
 
-def debug_dataset_consistency(batch, batch_idx):
-    """Debug function to check dataset loading consistency"""
-    print(f"\n🔍 DEBUG: Dataset Consistency Check (Batch {batch_idx})")
-    
-    inputs = batch['input']
-    target_idx = batch['target_idx'][0].item()
-    
-    # DEBUG: Let's see the raw batch data structure
-    print(f"🔍 DEBUG RAW: available_modalities type: {type(batch.get('available_modalities', 'MISSING'))}")
-    print(f"🔍 DEBUG RAW: available_modalities content: {batch.get('available_modalities', 'MISSING')}")
-    
-    # FIXED: With custom collate function, available_modalities is now a list of lists correctly
-    available_modalities = batch.get('available_modalities', [['unknown']])[0]
-    target_modality = batch.get('target_modality', ['unknown'])[0]
-    
-    print(f"Reported available modalities: {available_modalities}")
-    print(f"Target modality: {target_modality} (idx: {target_idx})")
-    
-    # Check which channels actually have data
-    modality_names = ['t1n', 't1c', 't2w', 't2f']
-    channels_with_data = []
-    
-    for i in range(4):
-        channel_data = inputs[0, i]
-        non_zero_count = torch.sum(channel_data > 0).item()
-        total_voxels = channel_data.numel()
-        percentage = (non_zero_count / total_voxels) * 100
-        
-        print(f"  Channel {i} ({modality_names[i]}): {non_zero_count}/{total_voxels} ({percentage:.1f}%) non-zero voxels")
-        
-        if non_zero_count > total_voxels * 0.01:  # >1% non-zero considered as having data
-            channels_with_data.append(modality_names[i])
-            print(f"    -> Has significant data: range [{channel_data.min():.3f}, {channel_data.max():.3f}]")
-        else:
-            print(f"    -> Minimal/no data (likely target channel set to zeros)")
-    
-    print(f"Channels with actual data: {channels_with_data}")
-    
-    # Check consistency
-    if len(channels_with_data) == 3:  # Expected: 3 input + 1 target (set to zeros)
-        print(f"✅ Dataset loading appears consistent (3 channels with data, 1 target set to zeros)")
-    else:
-        print(f"⚠️  Potential inconsistency: Expected 3 channels with data, found {len(channels_with_data)}")
-    
-    return channels_with_data
-
-
 def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, scaler, 
                        betas, t_intervals, config, args, device):
     """Enhanced training loop with improved debugging"""
@@ -321,21 +223,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 targets = batch['target'].unsqueeze(1).to(device)
                 target_idx = batch['target_idx'][0].item()
                 
-                # Enhanced debugging for first batch
-                if epoch == 0 and batch_idx == 0:
-                    print(f"\n=== FIRST BATCH DETAILED DEBUG ===")
-                    print(f"Input tensor shape: {inputs.shape}")
-                    print(f"Target tensor shape: {targets.shape}")
-                    print(f"Input range: [{inputs.min():.3f}, {inputs.max():.3f}]")
-                    print(f"Target range: [{targets.min():.3f}, {targets.max():.3f}]")
-                    
-                    # Check dataset consistency
-                    channels_with_data = debug_dataset_consistency(batch, batch_idx)
-                
-                # Periodic dataset consistency checks
-                if batch_idx in [1, 2, 10, 50, 100]:  # Check specific batches
-                    debug_dataset_consistency(batch, batch_idx)
-                
                 # Enhanced input validation
                 if torch.isnan(inputs).any() or torch.isnan(targets).any():
                     logging.warning(f"Skipping batch {batch_idx} due to NaN values in input")
@@ -348,27 +235,9 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 n = inputs.size(0)
                 
                 # Timestep sampling
-                if epoch == 0 and batch_idx <= 2:
-                    t = debug_timestep_sampling(t_intervals, n, method=args.timestep_method)
-                    t = t.to(device)
-                else:
-                    if args.timestep_method == "simple":
-                        idx = torch.randint(0, len(t_intervals), size=(n,))
-                        t = t_intervals[idx].to(device)
-                    else:
-                        # Fast-DDPM antithetic sampling
-                        idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
-                        idx_2 = len(t_intervals) - idx_1 - 1
-                        idx = torch.cat([idx_1, idx_2], dim=0)[:n]
-                        t = t_intervals[idx].to(device)
+                t = sample_timesteps(t_intervals, n, method=args.timestep_method).to(device)
                 
                 e = torch.randn_like(targets)
-                
-                # Detailed loss computation analysis for first batch
-                if epoch == 0 and batch_idx == 0:
-                    model_input_debug, e_scaled_debug = debug_loss_components_detailed(
-                        model, inputs, targets, t, e, betas, target_idx
-                    )
                 
                 # Compute loss
                 if args.no_mixed_precision:

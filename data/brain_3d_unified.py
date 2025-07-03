@@ -173,12 +173,6 @@ class BraTS3DUnifiedDataset(Dataset):
     def __getitem__(self, idx):
         case_dir, crop_idx = self.samples[idx]
         
-        # Debug logging for specific samples
-        debug_this_sample = (idx < 5) or (idx % 1000 == 0)
-        
-        if debug_this_sample:
-            logger.info(f"🔍 DEBUG [{idx}]: Loading modalities for {case_dir.name}")
-        
         # Load ALL modalities and track which ones are successfully loaded
         modality_volumes = {}
         successfully_loaded_modalities = []
@@ -187,9 +181,6 @@ class BraTS3DUnifiedDataset(Dataset):
         for modality in self.modalities:
             modality_file = self._find_modality_file(case_dir, modality)
             
-            if debug_this_sample:
-                logger.info(f"🔍 DEBUG [{idx}]: {modality} -> {modality_file}")
-            
             if modality_file:
                 volume, affine = self._load_full_volume(modality_file)
                 if volume is not None:
@@ -197,18 +188,6 @@ class BraTS3DUnifiedDataset(Dataset):
                     successfully_loaded_modalities.append(modality)
                     if volume_shape is None:
                         volume_shape = volume.shape
-                    
-                    if debug_this_sample:
-                        logger.info(f"🔍 DEBUG [{idx}]: {modality} loaded successfully, shape: {volume.shape}")
-                else:
-                    if debug_this_sample:
-                        logger.warning(f"🔍 DEBUG [{idx}]: {modality} failed to load (returned None)")
-            else:
-                if debug_this_sample:
-                    logger.warning(f"🔍 DEBUG [{idx}]: {modality} file not found")
-        
-        if debug_this_sample:
-            logger.info(f"🔍 DEBUG [{idx}]: Successfully loaded modalities: {successfully_loaded_modalities}")
         
         # Ensure we have enough modalities to proceed
         if len(successfully_loaded_modalities) < self.min_input_modalities:
@@ -221,8 +200,6 @@ class BraTS3DUnifiedDataset(Dataset):
                 if volume_shape is None:
                     volume_shape = (240, 240, 155)
                 modality_volumes[modality] = np.zeros(volume_shape, dtype=np.float32)
-                if debug_this_sample:
-                    logger.warning(f"🔍 DEBUG [{idx}]: Missing {modality} for {case_dir.name}, using zero volume")
         
         # Generate consistent random crop coordinates for all modalities
         random.seed(hash((case_dir.name, crop_idx)) % (2**32))
@@ -264,23 +241,9 @@ class BraTS3DUnifiedDataset(Dataset):
         if target_modality in successfully_loaded_modalities:
             # Target was successfully loaded but is set to zeros in input
             display_available_modalities = available_non_target_modalities.copy()
-            # Don't add the confusing "_as_zeros" suffix that was misleading
         else:
             # Target was not successfully loaded (missing file)
             display_available_modalities = available_non_target_modalities.copy()
-        
-        if debug_this_sample:
-            logger.info(f"🔍 DEBUG [{idx}]: target_modality={target_modality}, target_idx={target_idx}")
-            logger.info(f"🔍 DEBUG [{idx}]: successfully_loaded_modalities={successfully_loaded_modalities}")
-            logger.info(f"🔍 DEBUG [{idx}]: available_non_target_modalities={available_non_target_modalities}")
-            logger.info(f"🔍 DEBUG [{idx}]: display_available_modalities={display_available_modalities}")
-            logger.info(f"🔍 DEBUG [{idx}]: ABOUT TO RETURN - display_available_modalities={display_available_modalities}")
-            
-            # Additional debug: check what's actually in the input tensor
-            for i, mod in enumerate(self.modalities):
-                non_zero_count = torch.sum(input_modalities[i] > 0).item()
-                total_voxels = input_modalities[i].numel()
-                logger.info(f"🔍 DEBUG [{idx}]: Input channel {i} ({mod}): {non_zero_count}/{total_voxels} non-zero voxels")
         
         # Validation
         assert input_modalities.shape == (4, *self.crop_size)
