@@ -121,97 +121,80 @@ def find_modality_files(case_path, modalities):
 def load_brats_case(case_path, modalities, volume_size, target_modality):
     """
     Load a BraTS case with available modalities
-    🔥 FIXED: Now uses [0,1] normalization to match training
+    Now uses [-1,1] normalization to match training
     """
-    
     def reorient_volume(nifti_img):
         orig_ornt = nib.orientations.io_orientation(nifti_img.affine)
         targ_ornt = nib.orientations.axcodes2ornt("IPL")
         transform = nib.orientations.ornt_transform(orig_ornt, targ_ornt)
         return nifti_img.as_reoriented(transform)
-    
+
     def crop_volume(nifti_img):
         data = np.array(nifti_img.get_fdata())
         # Crop to 144x192x192 as in BraSyn
         data = data[8:152, 24:216, 24:216]
         return data
-    
-    def normalize_volume_0_1(volume):
-        """
-        🔥 FIXED: Professor's [0,1] normalization (not [-1,1])
-        """
+
+    def normalize_volume(volume):
         v_min = np.amin(volume)
-        v_max = np.amax(volume) 
+        v_max = np.amax(volume)
         if v_max > v_min:
-            # Normalize to [0,1] range to match training data
-            volume = (volume - v_min) / (v_max - v_min)
-        return np.clip(volume, 0.0, 1.0)
-    
+            # Normalize to [-1,1] range
+            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
+        return np.clip(volume, -1.0, 1.0)
+
     # Find available files
     vol_files = find_modality_files(case_path, modalities)
-    
     volumes = {}
     available_modalities = []
-    
     for modality in modalities:
         if vol_files[modality] is not None:
             file_path = vol_files[modality]
-            
             # Load and process
             nifti_img = nib.load(str(file_path))
             nifti_img = reorient_volume(nifti_img)
             data = crop_volume(nifti_img)
-            data = normalize_volume_0_1(data)  # 🔥 FIXED: [0,1] not [-1,1]
-            
+            data = normalize_volume(data)
             # Resize if needed
             if data.shape != volume_size:
                 data = torch.tensor(data).float()
                 data = torch.nn.functional.interpolate(
-                    data.unsqueeze(0).unsqueeze(0), 
-                    size=volume_size, 
-                    mode='trilinear', 
+                    data.unsqueeze(0).unsqueeze(0),
+                    size=volume_size,
+                    mode='trilinear',
                     align_corners=False
                 ).squeeze()
                 data = data.numpy()
-            
             volumes[modality] = torch.tensor(data, dtype=torch.float32)
             available_modalities.append(modality)
-            
             # Store affine for saving
             if modality == available_modalities[0]:
                 reference_affine = nifti_img.affine
-    
     # Create input tensor [4, H, W, D]
     input_tensor = torch.zeros(4, *volume_size)
     modality_mask = torch.zeros(4)
-    
     modality_order = ['t1n', 't1c', 't2w', 't2f']
     for i, modality in enumerate(modality_order):
         if modality in volumes and modality != target_modality:
             input_tensor[i] = volumes[modality]
             modality_mask[i] = 1.0
-    
     # Get target if available (for comparison)
     target_tensor = None
     if target_modality in volumes:
         target_tensor = volumes[target_modality]
-    
     return input_tensor, modality_mask, target_tensor, reference_affine, available_modalities
 
 
 def save_generated_volume(volume, affine, output_path):
     """
-    🔥 FIXED: Save generated volume assuming [0,1] input range
+    Save generated volume as NIfTI, denormalizing from [-1,1] to [0,1]
     """
     volume_np = volume.cpu().numpy()
-    
-    # Already in [0,1] range from sigmoid output
+    # Denormalize from [-1,1] to [0,1]
+    volume_np = (volume_np + 1) / 2
     volume_np = np.clip(volume_np, 0, 1)
-    
     # Scale to appropriate intensity range (0-1000 for medical images)
     volume_np = (volume_np * 1000).astype(np.float32)
-    
-    # Create NIfTI image
     nifti_img = nib.Nifti1Image(volume_np, affine)
     nib.save(nifti_img, output_path)
 
@@ -298,7 +281,7 @@ def main():
             modality_order = ['t1n', 't1c', 't2w', 't2f']
             target_idx = modality_order.index(args.target_modality)
             
-            # Initial noise - 🔥 FIXED: Appropriate range for [0,1] model
+            # Initial noise - match model's expected range [-1,1]
             noise_shape = (1, 1, *volume_size)
             x = torch.randn(noise_shape).to(device)
             
@@ -317,9 +300,8 @@ def main():
                 
                 # Get final result
                 generated = xs[-1].squeeze(0).squeeze(0)  # [H, W, D]
-                
-                # Clamp to valid [0,1] range
-                generated = torch.clamp(generated, 0, 1)
+                # Clamp to valid [-1,1] range
+                generated = torch.clamp(generated, -1, 1)
                 
                 print(f"Generated shape: {generated.shape}")
                 print(f"Generated range: [{generated.min():.3f}, {generated.max():.3f}]")

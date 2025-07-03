@@ -22,7 +22,7 @@ sys.path.append('..')
 # Import project modules
 from data.brain_3d_unified import BraTS3DUnifiedDataset
 from models.fast_ddpm_3d import FastDDPM3D
-from functions.losses import brats_4to1_loss
+from functions.losses import brats_4to1_enhanced_loss, Simple3DPerceptualNet
 from functions.denoising_3d import generalized_steps_3d, unified_4to1_generalized_steps_3d
 
 # Minimal training utils
@@ -189,6 +189,8 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
     logging.info(f"Batch size: {config.training.batch_size}")
     logging.info(f"Log every: {config.training.log_every_n_steps} steps")
     logging.info(f"Mixed precision: {not args.no_mixed_precision}")
+
+    perceptual_net = Simple3DPerceptualNet(input_channels=1).to(device)
     
     # Training loop
     for epoch in range(config.training.epochs):
@@ -221,8 +223,10 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 e = torch.randn_like(targets)
                 
                 # Compute loss with mixed precision
+
                 with autocast(enabled=not args.no_mixed_precision):
-                    loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                    loss = brats_4to1_enhanced_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx,
+                        perceptual_net=perceptual_net)
                 
                 # Loss validation
                 if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:

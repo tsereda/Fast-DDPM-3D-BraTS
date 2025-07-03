@@ -1,33 +1,234 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 np.bool = np.bool_
 
 
-def brats_4to1_loss(model,
-                    x_available: torch.Tensor,
-                    x_target: torch.Tensor,
-                    t: torch.LongTensor,
-                    e: torch.Tensor,
-                    b: torch.Tensor, 
-                    target_idx: int = 0,
-                    keepdim=False):
+def compute_3d_gradient(tensor):
+    """Compute 3D gradients for edge preservation"""
+    # Sobel-like 3D gradient computation
+    grad_x = F.conv3d(tensor, torch.tensor([[[[-1, 0, 1]]]]).float().to(tensor.device), padding=1)
+    grad_y = F.conv3d(tensor, torch.tensor([[[[-1], [0], [1]]]]).float().to(tensor.device), padding=1)
+    grad_z = F.conv3d(tensor, torch.tensor([[[[-1]], [[0]], [[1]]]]).float().to(tensor.device), padding=1)
+    
+    return torch.sqrt(grad_x**2 + grad_y**2 + grad_z**2 + 1e-8)
+
+
+def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
+    """Simplified 3D SSIM for structural similarity"""
+    # Create 3D Gaussian window
+    coords = torch.arange(window_size, dtype=torch.float32, device=x.device)
+    coords -= window_size // 2
+    
+    g = torch.exp(-(coords**2) / (2 * window_sigma**2))
+    g = g / g.sum()
+    
+    # Create 3D kernel
+    kernel = g.view(1, 1, window_size, 1, 1) * g.view(1, 1, 1, window_size, 1) * g.view(1, 1, 1, 1, window_size)
+    kernel = kernel.expand(x.size(1), 1, window_size, window_size, window_size)
+    
+    # Compute means
+    mu_x = F.conv3d(x, kernel, padding=window_size//2, groups=x.size(1))
+    mu_y = F.conv3d(y, kernel, padding=window_size//2, groups=y.size(1))
+    
+    # Compute variances and covariance
+    mu_x_sq = mu_x**2
+    mu_y_sq = mu_y**2
+    mu_xy = mu_x * mu_y
+    
+    sigma_x_sq = F.conv3d(x**2, kernel, padding=window_size//2, groups=x.size(1)) - mu_x_sq
+    sigma_y_sq = F.conv3d(y**2, kernel, padding=window_size//2, groups=y.size(1)) - mu_y_sq
+    sigma_xy = F.conv3d(x*y, kernel, padding=window_size//2, groups=x.size(1)) - mu_xy
+    
+    # SSIM computation
+    c1 = 0.01**2
+    c2 = 0.03**2
+    
+    ssim_map = ((2*mu_xy + c1) * (2*sigma_xy + c2)) / ((mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2))
+    
+    return ssim_map.mean()
+
+
+class Simple3DPerceptualNet(nn.Module):
+    """Lightweight 3D feature extractor for perceptual loss"""
+    
+    def __init__(self, input_channels=1):
+        super().__init__()
+        
+        # Simple 3D feature extractor - lightweight for memory efficiency
+        self.features = nn.Sequential(
+            # Layer 1: Basic edge detection
+            nn.Conv3d(input_channels, 16, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(16, 16, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.AvgPool3d(2),
+            
+            # Layer 2: Pattern detection
+            nn.Conv3d(16, 32, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(32, 32, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.AvgPool3d(2),
+            
+            # Layer 3: Structure detection
+            nn.Conv3d(32, 64, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+        )
+        
+        # Initialize as identity-like transformation
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize to be close to identity transformation"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                # Scale down to prevent dominating the main loss
+                m.weight.data *= 0.1
+    
+    def forward(self, x):
+        features = []
+        x = self.features[:4](x)  # First layer
+        features.append(x)
+        
+        x = self.features[4:8](x)  # Second layer
+        features.append(x)
+        
+        x = self.features[8:](x)   # Third layer
+        features.append(x)
+        
+        return features
+
+
+def brats_4to1_enhanced_loss(model,
+                           x_available: torch.Tensor,
+                           x_target: torch.Tensor,
+                           t: torch.LongTensor,
+                           e: torch.Tensor,
+                           b: torch.Tensor,
+                           target_idx: int = 0,
+                           perceptual_net: nn.Module = None,
+                           loss_weights: dict = None,
+                           keepdim=False):
     """
-    BraTS 4→1 modality synthesis loss using available modalities as context
+    Enhanced BraTS 4→1 loss with perceptual components
+    
+    Args:
+        model: The diffusion model
+        x_available: Available modalities [B, 4, H, W, D]
+        x_target: Target modality [B, 1, H, W, D]
+        t: Timesteps
+        e: Noise
+        b: Beta schedule
+        target_idx: Index of target modality
+        perceptual_net: Pre-trained perceptual network
+        loss_weights: Dictionary of loss component weights
+        keepdim: Whether to keep dimensions for batch-wise loss
+    
+    Returns:
+        Enhanced loss combining MSE, gradient, SSIM, and perceptual losses
     """
+    
+    # Default loss weights - conservative to not break existing training
+    if loss_weights is None:
+        loss_weights = {
+            'mse': 1.0,        # Main loss
+            'gradient': 0.1,   # Edge preservation
+            'ssim': 0.1,       # Structural similarity
+            'perceptual': 0.05 # Feature matching (small weight)
+        }
+    
+    # Standard diffusion forward process
     a = (1-b).cumprod(dim=0)
-    # Remove clamping
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
-    # Remove noise scaling
-    # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
+    
+    # Add noise to target
     x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
-    # Remove input clamping
-    # Prepare model input: replace target channel with noisy version
+    
+    # Prepare model input
     model_input = x_available.clone()
     model_input[:, target_idx:target_idx+1] = x_noisy
-    # Model predicts noise
+    
+    # Model prediction
+    predicted_noise = model(model_input, t.float())
+    
+    # === LOSS COMPONENTS ===
+    
+    # 1. Main MSE loss (noise prediction)
+    mse_loss = (e - predicted_noise).square().mean(dim=(1, 2, 3, 4) if keepdim else None)
+    
+    # 2. Gradient loss for edge preservation
+    # Predict the clean image to compute perceptual losses
+    x_pred = (x_noisy - predicted_noise * (1.0 - a).sqrt()) / a.sqrt()
+    
+    grad_target = compute_3d_gradient(x_target)
+    grad_pred = compute_3d_gradient(x_pred)
+    gradient_loss = F.mse_loss(grad_pred, grad_target, reduction='none')
+    gradient_loss = gradient_loss.mean(dim=(1, 2, 3, 4) if keepdim else None)
+    
+    # 3. SSIM loss for structural similarity
+    ssim_value = compute_3d_ssim(x_pred, x_target)
+    ssim_loss = 1 - ssim_value
+    
+    # 4. Perceptual loss (if network provided)
+    perceptual_loss = 0
+    if perceptual_net is not None:
+        with torch.no_grad():
+            # Don't update perceptual net weights
+            target_features = perceptual_net(x_target)
+        
+        pred_features = perceptual_net(x_pred)
+        
+        # Multi-scale feature matching
+        perceptual_loss = 0
+        for pred_feat, target_feat in zip(pred_features, target_features):
+            perceptual_loss += F.mse_loss(pred_feat, target_feat.detach())
+        
+        perceptual_loss = perceptual_loss / len(pred_features)
+    
+    # === COMBINE LOSSES ===
+    total_loss = (loss_weights['mse'] * mse_loss + 
+                  loss_weights['gradient'] * gradient_loss + 
+                  loss_weights['ssim'] * ssim_loss + 
+                  loss_weights['perceptual'] * perceptual_loss)
+    
+    # Return detailed loss info for monitoring
+    if keepdim:
+        return {
+            'total_loss': total_loss,
+            'mse_loss': mse_loss,
+            'gradient_loss': gradient_loss,
+            'ssim_loss': ssim_loss,
+            'perceptual_loss': perceptual_loss
+        }
+    else:
+        return total_loss
+
+
+def get_loss_function(loss_type='brats_4to1_enhanced'):
+    """
+    Factory function to get the appropriate loss function
+    """
+    if loss_type == 'brats_4to1':
+        return brats_4to1_loss  # Original loss
+    elif loss_type == 'brats_4to1_enhanced':
+        return brats_4to1_enhanced_loss  # Enhanced loss
+    else:
+        raise ValueError(f"Unknown loss type '{loss_type}'. Available: ['brats_4to1', 'brats_4to1_enhanced']")
+
+
+# Keep original loss for backwards compatibility
+def brats_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0, keepdim=False):
+    """Original BraTS 4→1 loss for backwards compatibility"""
+    a = (1-b).cumprod(dim=0)
+    a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
+    x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
+    model_input = x_available.clone()
+    model_input[:, target_idx:target_idx+1] = x_noisy
     output = model(model_input, t.float())
-    # Use e directly in loss
     loss_raw = (e - output).square()
     if keepdim:
         return loss_raw.mean(dim=(1, 2, 3, 4))
@@ -35,143 +236,71 @@ def brats_4to1_loss(model,
         return loss_raw.mean()
 
 
-def get_loss_function(loss_type='brats_4to1'):
-    """
-    Factory function to get the appropriate loss function
-    """
-    if loss_type == 'brats_4to1':
-        return brats_4to1_loss
-    else:
-        raise ValueError(f"Unknown loss type '{loss_type}'. Available: ['brats_4to1']")
-
-
-# Export list
-__all__ = [
-    'brats_4to1_loss',              # Main BraTS 4→1 loss
-    'get_loss_function',            # Factory function
-    'debug_loss_components',        # Debug function
-    'test_minimal_loss',           # Quick test function
-]
-
-
-def debug_loss_components(x_available, x_target, t, e, b, target_idx=0):
-    """
-    Debug function to analyze loss components without model forward pass
-    Returns statistics about each component to identify numerical issues
-    
-    Args:
-        Same as brats_4to1_loss but without model
-        
-    Returns:
-        dict: Statistics about each component
-    """
-    stats = {}
-    
-    # Alpha computation
-    a = (1-b).cumprod(dim=0)
-    stats['alpha_raw_range'] = (a.min().item(), a.max().item())
-    
-    a = torch.clamp(a, min=1e-8, max=1.0)
-    a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
-    stats['alpha_selected'] = a.item() if a.numel() == 1 else (a.min().item(), a.max().item())
-    
-    # Test different noise scalings
-    noise_scalings = [1.0, 0.1, 0.01, 0.001]
-    stats['noise_scaling_tests'] = {}
-    
-    for scale in noise_scalings:
-        e_scaled = e * scale
-        x_noisy = x_target * a.sqrt() + e_scaled * (1.0 - a).sqrt()
-        
-        stats['noise_scaling_tests'][scale] = {
-            'scaled_noise_range': (e_scaled.min().item(), e_scaled.max().item()),
-            'noisy_input_range': (x_noisy.min().item(), x_noisy.max().item()),
-            'extreme_values': x_noisy.abs().max().item() > 2.0
-        }
-    
-    # Input data stats
-    stats['input_data'] = {
-        'x_available_range': (x_available.min().item(), x_available.max().item()),
-        'x_target_range': (x_target.min().item(), x_target.max().item()),
-        'original_noise_range': (e.min().item(), e.max().item())
-    }
-    
-    return stats
-
-
-def test_minimal_loss():
-    """
-    Quick test function to verify loss computation works
-    Run this to quickly check if your loss function has obvious issues
-    """
-    print("🧪 Running minimal loss function test...")
+def test_enhanced_loss():
+    """Test the enhanced loss function"""
+    print("🧪 Testing Enhanced Loss Function...")
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Create minimal test data
-    B, C, H, W, D = 1, 4, 8, 8, 8
-    x_available = torch.rand(B, C, H, W, D).to(device) * 0.5
-    x_target = torch.rand(B, 1, H, W, D).to(device) * 0.5
+    # Create test data
+    B, C, H, W, D = 2, 4, 16, 16, 16
+    x_available = torch.randn(B, C, H, W, D).to(device) * 0.5
+    x_target = torch.randn(B, 1, H, W, D).to(device) * 0.5
     e = torch.randn_like(x_target)
-    t = torch.randint(0, 10, (B,)).to(device)
-    b = torch.linspace(0.0001, 0.02, 10).to(device)
+    t = torch.randint(0, 1000, (B,)).to(device)
+    b = torch.linspace(0.0001, 0.02, 1000).to(device)
     
-    print(f"Test data shapes: x_available={x_available.shape}, x_target={x_target.shape}")
+    # Create perceptual network
+    perceptual_net = Simple3DPerceptualNet(input_channels=1).to(device)
     
-    # Debug components
-    stats = debug_loss_components(x_available, x_target, t, e, b)
-    
-    print("\n📊 Component Analysis:")
-    print(f"Alpha selected: {stats['alpha_selected']}")
-    print(f"Input data ranges:")
-    print(f"  x_available: {stats['input_data']['x_available_range']}")
-    print(f"  x_target: {stats['input_data']['x_target_range']}")
-    print(f"  original_noise: {stats['input_data']['original_noise_range']}")
-    
-    print(f"\n🎛️  Noise Scaling Tests:")
-    for scale, results in stats['noise_scaling_tests'].items():
-        status = "🚨 EXTREME" if results['extreme_values'] else "✅ OK"
-        print(f"  Scale {scale}: noisy_range={results['noisy_input_range']} {status}")
-    
-    # Test with simple model
-    class SimpleTestModel(torch.nn.Module):
+    # Simple model for testing
+    class TestModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.conv = torch.nn.Conv3d(4, 1, 3, padding=1)
+            self.conv = nn.Conv3d(4, 1, 3, padding=1)
         
         def forward(self, x, t):
             return self.conv(x)
     
-    model = SimpleTestModel().to(device)
+    model = TestModel().to(device)
     
-    # Test loss computation
-    try:
-        loss = brats_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0)
-        print(f"\n📈 Loss Value: {loss.item():.6f}")
-        
-        if torch.isnan(loss) or torch.isinf(loss):
-            print("🚨 LOSS IS NaN OR INFINITY!")
-        elif loss.item() > 10:
-            print("⚠️  Loss is quite large")
-        else:
-            print("✅ Loss value seems reasonable")
-        
-        # Test gradients
-        loss.backward()
-        total_norm = sum(p.grad.norm(2).item()**2 for p in model.parameters() if p.grad is not None)**0.5
-        print(f"📐 Gradient norm: {total_norm:.6f}")
-        
-        if total_norm > 100:
-            print("🚨 GRADIENT EXPLOSION DETECTED!")
-        else:
-            print("✅ Gradients are reasonable")
-            
-    except Exception as e:
-        print(f"❌ Error in loss computation: {e}")
+    # Test original loss
+    original_loss = brats_4to1_loss(model, x_available, x_target, t, e, b, target_idx=0)
+    print(f"Original Loss: {original_loss.item():.6f}")
     
-    return stats
+    # Test enhanced loss
+    enhanced_loss = brats_4to1_enhanced_loss(
+        model, x_available, x_target, t, e, b, 
+        target_idx=0, perceptual_net=perceptual_net
+    )
+    print(f"Enhanced Loss: {enhanced_loss.item():.6f}")
+    
+    # Test with detailed output
+    loss_details = brats_4to1_enhanced_loss(
+        model, x_available, x_target, t, e, b,
+        target_idx=0, perceptual_net=perceptual_net, keepdim=True
+    )
+    
+    print("\n📊 Loss Component Breakdown:")
+    for key, value in loss_details.items():
+        if torch.is_tensor(value):
+            print(f"  {key}: {value.mean().item():.6f}")
+        else:
+            print(f"  {key}: {value:.6f}")
+    
+    print("✅ Enhanced loss function test completed!")
+    return loss_details
 
 
-# Quick test when file is run directly
+# Export list
+__all__ = [
+    'brats_4to1_loss',              # Original loss
+    'brats_4to1_enhanced_loss',     # Enhanced loss
+    'Simple3DPerceptualNet',        # Perceptual network
+    'get_loss_function',            # Factory function
+    'test_enhanced_loss',           # Test function
+]
+
+
 if __name__ == '__main__':
-    test_minimal_loss()
+    test_enhanced_loss()
