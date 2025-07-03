@@ -227,6 +227,10 @@ class BraTS3DUnifiedDataset(Dataset):
         target_idx = self.modalities.index(target_modality)
         target_volume = cropped_volumes[target_modality]
         
+        # 🔥 FIX: Update available_modalities to exclude the target modality
+        # The model should only see the 3 available input modalities, not the target
+        input_available_modalities = [mod for mod in available_modalities if mod != target_modality]
+        
         # Create input with target modality masked (set to zero)
         input_modalities = torch.stack([cropped_volumes[mod] for mod in self.modalities])
         input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
@@ -243,6 +247,6 @@ class BraTS3DUnifiedDataset(Dataset):
             'target_idx': target_idx,
             'case_name': case_dir.name,
             'target_modality': target_modality,
-            'available_modalities': available_modalities,
+            'available_modalities': input_available_modalities,  # 🔥 FIX: Only the 3 input modalities
             'crop_coords': crop_coords
         }
