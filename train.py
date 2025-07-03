@@ -319,7 +319,7 @@ def training_loop_fixed(model, train_loader, val_loader, optimizer, scheduler, s
                 # Backward pass
                 scaler.scale(loss).backward()
                 
-                # 🔥 FIXED: Check gradients before clipping
+                # 🔥 FIXED: Check gradients before clipping  
                 total_norm = 0
                 for p in model.parameters():
                     if p.grad is not None:
@@ -327,14 +327,15 @@ def training_loop_fixed(model, train_loader, val_loader, optimizer, scheduler, s
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** (1. / 2)
                 
-                if total_norm > 100:  # Very large gradient
+                # 🔥 CRITICAL FIX: Much stricter gradient check for 3D medical imaging
+                if total_norm > 10:  # Much stricter threshold
                     logging.warning(f"Large gradient norm detected: {total_norm:.3f}, skipping batch")
                     optimizer.zero_grad()
                     continue
                 
-                # Gradient clipping
+                # 🔥 MUCH MORE AGGRESSIVE gradient clipping for 3D stability
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)  # Much stricter clipping
                 
                 # Optimizer step
                 scaler.step(optimizer)
