@@ -349,28 +349,21 @@ class FastDDPM3D(nn.Module):
     
     def _init_weights(self):
         """
-        🔥 CRITICAL FIX: Proper weight initialization for 3D medical imaging
-        This prevents gradient explosion in large 3D models
+        Improved weight initialization for diffusion models:
+        - He initialization for all Conv3d and Linear layers (since we use ReLU)
+        - GroupNorm weights to 1, bias to 0
+        - Final conv_out layer: very small std
+        - (Optional) Timestep embedding layers: smaller std if desired
         """
         for name, module in self.named_modules():
-            if isinstance(module, nn.Conv3d):
-                # He initialization for Conv3d
+            if isinstance(module, (nn.Conv3d, nn.Linear)):
                 nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
-                    
-            elif isinstance(module, nn.Linear):
-                # Xavier initialization for Linear layers
-                nn.init.xavier_normal_(module.weight, gain=1.0)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-                    
             elif isinstance(module, nn.GroupNorm):
-                # Proper GroupNorm initialization
                 nn.init.constant_(module.weight, 1)
                 nn.init.constant_(module.bias, 0)
-        
-        # Special initialization for output layer - start very small
+        # Most critical: Final output layer very small
         if hasattr(self, 'conv_out'):
             nn.init.normal_(self.conv_out.weight, mean=0.0, std=0.001)
             if self.conv_out.bias is not None:
