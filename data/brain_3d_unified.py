@@ -194,8 +194,8 @@ class BraTS3DUnifiedDataset(Dataset):
         successful_modalities = []
         volume_shape = None
         
-        # 🔥 DEBUG: Enable debug logging for first few samples to diagnose the issue
-        debug_this_sample = idx < 10  # Debug first 10 samples
+        # 🔥 DEBUG: Enable debug logging for first few samples and periodic samples to diagnose the issue
+        debug_this_sample = (idx < 5) or (idx % 1000 == 0)  # Debug first 5 samples and every 1000th sample
         
         if debug_this_sample:
             logger.info(f"🔍 DEBUG [{idx}]: Loading modalities for {case_dir.name}")

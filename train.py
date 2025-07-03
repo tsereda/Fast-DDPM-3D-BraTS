@@ -123,10 +123,28 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
         
         # Generate samples using the reverse process
         try:
-            # Use your unified_4to1_generalized_steps_3d function
-            generated = unified_4to1_generalized_steps_3d(
-                inputs, model, betas, t_intervals, target_idx
+            # Create initial noise for the target modality
+            x_target_noise = torch.randn_like(targets)  # [B, 1, H, W, D] 
+            
+            # Call with correct parameter order
+            generated_sequence, x0_preds = unified_4to1_generalized_steps_3d(
+                x=x_target_noise,
+                x_available=inputs,
+                target_idx=target_idx, 
+                seq=t_intervals.cpu().numpy(),
+                model=model,
+                b=betas
             )
+            
+            # Get the final generated sample
+            generated = generated_sequence[-1] if generated_sequence else None
+            
+            # Debug the generated output
+            if generated is not None:
+                logging.info(f"Generated samples shape: {generated.shape}")
+                logging.info(f"Generated range: [{generated.min():.3f}, {generated.max():.3f}]")
+            else:
+                logging.warning("Generated samples is None")
             
             # Create comparison images (take middle slice for visualization)
             middle_slice = inputs.size(-1) // 2
@@ -135,8 +153,9 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
             images_to_log = []
             
             for i in range(min(num_samples, 4)):  # Log up to 4 samples
-                # Original input (take first channel)
-                input_img = inputs[i, 0, :, :, middle_slice].cpu().numpy()
+                # Original input (take first channel that's not the target)
+                available_channels = [j for j in range(4) if j != target_idx]
+                input_img = inputs[i, available_channels[0], :, :, middle_slice].cpu().numpy()
                 
                 # Ground truth target
                 target_img = targets[i, 0, :, :, middle_slice].cpu().numpy()
@@ -234,6 +253,25 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     print(f"Target range: [{targets.min():.3f}, {targets.max():.3f}]")
                     print(f"Target modality: {batch['target_modality'][0]}")
                     print(f"Available modalities: {batch['available_modalities'][0]}")
+                    
+                    print(f"\n=== TRAINING BATCH DEBUG ===")
+                    print(f"Batch case name: {batch['case_name'][0]}")
+                    print(f"Successful modalities should be: ['t1n', 't1c', 't2w', 't2f']")
+                    print(f"But available_modalities shows: {batch['available_modalities'][0]}")
+                    print(f"This suggests only {len(batch['available_modalities'][0])} modalities loaded for training")
+                    print(f"Target modality: {batch['target_modality'][0]}")
+                    print(f"Target idx: {batch['target_idx'][0].item()}")
+                    
+                    print(f"\nInput tensor analysis:")
+                    for i in range(4):
+                        channel_data = inputs[0, i]
+                        non_zero_count = torch.sum(channel_data > 0).item()
+                        total_voxels = channel_data.numel()
+                        print(f"  Channel {i} ({['t1n', 't1c', 't2w', 't2f'][i]}): {non_zero_count}/{total_voxels} non-zero voxels")
+                        if non_zero_count == 0:
+                            print(f"    -> Channel {i} is all zeros (target or missing)")
+                        else:
+                            print(f"    -> Channel {i} has data: range [{channel_data.min():.3f}, {channel_data.max():.3f}]")
                 
                 # Enhanced input validation
                 if torch.isnan(inputs).any() or torch.isnan(targets).any():
