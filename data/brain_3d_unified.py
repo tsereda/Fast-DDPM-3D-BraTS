@@ -12,10 +12,8 @@ logger = logging.getLogger(__name__)
 
 class BraTS3DUnifiedDataset(Dataset):
     """
-    Updated BraTS 3D dataset following professor's recommendations:
-    1. Random cropping (no rescaling)
-    2. Min-max normalization to [0,1]
-    3. Consistent spatial regions across modalities
+    Fixed BraTS 3D dataset with corrected available_modalities reporting
+    and improved debugging capabilities
     """
     
     def __init__(self, data_root, phase='train', crop_size=(64, 64, 64), 
@@ -24,13 +22,12 @@ class BraTS3DUnifiedDataset(Dataset):
         self.phase = phase
         self.crop_size = tuple(crop_size)
         self.min_input_modalities = min_input_modalities
-        self.crops_per_volume = crops_per_volume  # Multiple crops per MRI
+        self.crops_per_volume = crops_per_volume
         
         # Standard BraTS modalities
         self.modalities = ['t1n', 't1c', 't2w', 't2f']
         
-        # Global normalization statistics computed from actual training data
-        # Updated with actual statistics from compute_normalization_stats.py
+        # Global normalization statistics
         self.global_stats = {
             't1n': {'min': 0.0, 'max': 4900.4},
             't1c': {'min': 0.0, 'max': 9532.3},
@@ -72,7 +69,6 @@ class BraTS3DUnifiedDataset(Dataset):
     
     def _find_modality_file(self, case_dir, modality):
         """Find modality file using specific BraTS patterns"""
-        # 🔥 FIXED: Use more specific patterns to avoid mismatches
         patterns = [
             f'*-{modality}.nii*',        # Exact match: BraTS-GLI-xxxxx-t1n.nii.gz
             f'*_{modality}.nii*',        # Underscore: case_t1n.nii.gz
@@ -86,8 +82,7 @@ class BraTS3DUnifiedDataset(Dataset):
                 # Filter to ensure the modality name appears exactly at word boundaries
                 exact_files = []
                 for f in files:
-                    # Check if modality appears as complete word in filename
-                    fname = f.stem.lower()  # Remove .nii.gz and convert to lowercase
+                    fname = f.stem.lower()
                     if (f'-{modality}.' in f.name.lower() or 
                         f'_{modality}.' in f.name.lower() or
                         f'{modality}.' in f.name.lower() or
@@ -111,17 +106,12 @@ class BraTS3DUnifiedDataset(Dataset):
             return None, None
     
     def _get_random_crop_coords(self, volume_shape):
-        """
-        Get random crop coordinates that fit within volume
-        Returns the same coordinates for all modalities to ensure spatial consistency
-        """
+        """Get random crop coordinates that fit within volume"""
         coords = []
         for i, (vol_dim, crop_dim) in enumerate(zip(volume_shape, self.crop_size)):
             if vol_dim <= crop_dim:
-                # If volume dimension is smaller than crop, start at 0
                 start = 0
             else:
-                # Random start position
                 max_start = vol_dim - crop_dim
                 start = random.randint(0, max_start)
             coords.append((start, start + crop_dim))
@@ -152,23 +142,17 @@ class BraTS3DUnifiedDataset(Dataset):
         return crop
     
     def _normalize_volume_0_1(self, volume, modality=None):
-        """
-        Professor's recommendation: Min-max normalization to [0, 1]
-        Uses global dataset statistics for consistent scaling across volumes
-        """
+        """Min-max normalization to [0, 1] using global statistics"""
         # Handle zero or constant volumes
         if not np.any(volume > 0):
             return np.zeros_like(volume)
         
         if modality is not None and modality in self.global_stats:
-            # Use global statistics for consistent normalization across all volumes
-            # This prevents per-volume scaling that can cause inconsistencies
             global_min = self.global_stats[modality]['min']
             global_max = self.global_stats[modality]['max']
         else:
-            # Fallback to typical global statistics
-            global_min = 0.0  # Typical minimum intensity for BraTS after preprocessing
-            global_max = np.percentile(volume[volume > 0], 99.9)  # Use 99.9 percentile to avoid outliers
+            global_min = 0.0
+            global_max = np.percentile(volume[volume > 0], 99.9)
         
         if global_max <= global_min:
             return np.zeros_like(volume)
@@ -189,16 +173,16 @@ class BraTS3DUnifiedDataset(Dataset):
     def __getitem__(self, idx):
         case_dir, crop_idx = self.samples[idx]
         
-        # 🔥 FIXED: Always load ALL 4 modalities for consistent input
-        modality_volumes = {}
-        successful_modalities = []
-        volume_shape = None
-        
-        # 🔥 DEBUG: Enable debug logging for first few samples and periodic samples to diagnose the issue
-        debug_this_sample = (idx < 5) or (idx % 1000 == 0)  # Debug first 5 samples and every 1000th sample
+        # Debug logging for specific samples
+        debug_this_sample = (idx < 5) or (idx % 1000 == 0)
         
         if debug_this_sample:
             logger.info(f"🔍 DEBUG [{idx}]: Loading modalities for {case_dir.name}")
+        
+        # Load ALL modalities and track which ones are successfully loaded
+        modality_volumes = {}
+        successfully_loaded_modalities = []
+        volume_shape = None
         
         for modality in self.modalities:
             modality_file = self._find_modality_file(case_dir, modality)
@@ -210,7 +194,7 @@ class BraTS3DUnifiedDataset(Dataset):
                 volume, affine = self._load_full_volume(modality_file)
                 if volume is not None:
                     modality_volumes[modality] = volume
-                    successful_modalities.append(modality)
+                    successfully_loaded_modalities.append(modality)
                     if volume_shape is None:
                         volume_shape = volume.shape
                     
@@ -224,25 +208,23 @@ class BraTS3DUnifiedDataset(Dataset):
                     logger.warning(f"🔍 DEBUG [{idx}]: {modality} file not found")
         
         if debug_this_sample:
-            logger.info(f"🔍 DEBUG [{idx}]: Final successful_modalities: {successful_modalities}")
+            logger.info(f"🔍 DEBUG [{idx}]: Successfully loaded modalities: {successfully_loaded_modalities}")
         
         # Ensure we have enough modalities to proceed
-        if len(successful_modalities) < self.min_input_modalities:
+        if len(successfully_loaded_modalities) < self.min_input_modalities:
             # Fallback to zero volumes
             volume_shape = (240, 240, 155)  # Standard BraTS size
         
-        # 🔥 CRITICAL FIX: Always ensure ALL 4 modalities are present
         # Fill missing modalities with zeros to maintain consistent 4-channel input
         for modality in self.modalities:
             if modality not in modality_volumes:
                 if volume_shape is None:
-                    volume_shape = (240, 240, 155)  # Standard BraTS size
+                    volume_shape = (240, 240, 155)
                 modality_volumes[modality] = np.zeros(volume_shape, dtype=np.float32)
                 if debug_this_sample:
                     logger.warning(f"🔍 DEBUG [{idx}]: Missing {modality} for {case_dir.name}, using zero volume")
         
         # Generate consistent random crop coordinates for all modalities
-        # Use crop_idx as seed for reproducible crops per case
         random.seed(hash((case_dir.name, crop_idx)) % (2**32))
         crop_coords = self._get_random_crop_coords(volume_shape)
         
@@ -254,43 +236,50 @@ class BraTS3DUnifiedDataset(Dataset):
             # Extract crop using same coordinates
             cropped = self._extract_crop(volume, crop_coords)
             
-            # Professor's normalization: min-max to [0, 1]
+            # Normalize to [0, 1]
             normalized = self._normalize_volume_0_1(cropped, modality=modality)
             
             cropped_volumes[modality] = torch.FloatTensor(normalized)
         
-        # Select target modality for synthesis from successfully loaded modalities
-        if self.phase == 'train' and len(successful_modalities) > 0:
-            target_modality = random.choice(successful_modalities)
-        elif len(successful_modalities) > 0:
-            target_modality = successful_modalities[0]
+        # Select target modality from successfully loaded modalities
+        if self.phase == 'train' and len(successfully_loaded_modalities) > 0:
+            target_modality = random.choice(successfully_loaded_modalities)
+        elif len(successfully_loaded_modalities) > 0:
+            target_modality = successfully_loaded_modalities[0]
         else:
-            target_modality = self.modalities[0]  # Fallback to first modality
+            target_modality = self.modalities[0]  # Fallback
         
         target_idx = self.modalities.index(target_modality)
         target_volume = cropped_volumes[target_modality]
         
-        # 🔥 FIXED: Available modalities are the 3 non-target modalities that were successfully loaded
-        # This should typically be 3 modalities (all except target), but could be fewer if data is incomplete
-        available_non_target_modalities = [mod for mod in successful_modalities if mod != target_modality]
-        
-        # 🔥 CRITICAL FIX: Create input with target modality replaced by ZEROS (not noise)
+        # FIXED: Create input with target modality replaced by ZEROS
         input_modalities = torch.stack([cropped_volumes[mod] for mod in self.modalities])
-        
-        # Replace target modality with ZEROS instead of Gaussian noise
-        # Gaussian noise was causing worse gradient explosion (40k+ vs 10k)
         input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
         
-        # For display purposes, show which 3 modalities are actually available (non-zero)
-        # Plus indicate if target is replaced with zeros
-        display_available_modalities = available_non_target_modalities.copy()
-        if target_modality in successful_modalities:
-            display_available_modalities.append(f"{target_modality}_as_zeros")
+        # FIXED: Correct available_modalities reporting
+        # Available modalities are the 3 non-target modalities that were successfully loaded
+        available_non_target_modalities = [mod for mod in successfully_loaded_modalities if mod != target_modality]
+        
+        # For display purposes, show the actual status more clearly
+        if target_modality in successfully_loaded_modalities:
+            # Target was successfully loaded but is set to zeros in input
+            display_available_modalities = available_non_target_modalities.copy()
+            # Don't add the confusing "_as_zeros" suffix that was misleading
+        else:
+            # Target was not successfully loaded (missing file)
+            display_available_modalities = available_non_target_modalities.copy()
         
         if debug_this_sample:
             logger.info(f"🔍 DEBUG [{idx}]: target_modality={target_modality}, target_idx={target_idx}")
+            logger.info(f"🔍 DEBUG [{idx}]: successfully_loaded_modalities={successfully_loaded_modalities}")
             logger.info(f"🔍 DEBUG [{idx}]: available_non_target_modalities={available_non_target_modalities}")
             logger.info(f"🔍 DEBUG [{idx}]: display_available_modalities={display_available_modalities}")
+            
+            # Additional debug: check what's actually in the input tensor
+            for i, mod in enumerate(self.modalities):
+                non_zero_count = torch.sum(input_modalities[i] > 0).item()
+                total_voxels = input_modalities[i].numel()
+                logger.info(f"🔍 DEBUG [{idx}]: Input channel {i} ({mod}): {non_zero_count}/{total_voxels} non-zero voxels")
         
         # Validation
         assert input_modalities.shape == (4, *self.crop_size)
@@ -304,6 +293,7 @@ class BraTS3DUnifiedDataset(Dataset):
             'target_idx': target_idx,
             'case_name': case_dir.name,
             'target_modality': target_modality,
-            'available_modalities': display_available_modalities,  # 🔥 FIXED: Shows 3 non-target + target_as_zeros
+            'available_modalities': display_available_modalities,  # FIXED: Now correctly shows non-target modalities
+            'successfully_loaded_modalities': successfully_loaded_modalities,  # NEW: Shows all loaded modalities
             'crop_coords': crop_coords
         }

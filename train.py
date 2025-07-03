@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Debug-enhanced training script to identify gradient explosion root cause
+Fixed debug-enhanced training script for 3D Fast-DDPM
+Addresses dataset loading inconsistencies and W&B logging issues
 """
 
 import os
@@ -38,9 +39,7 @@ except ImportError:
 
 
 def debug_timestep_sampling(t_intervals, batch_size, method="antithetic"):
-    """
-    Debug function to analyze timestep sampling behavior
-    """
+    """Debug function to analyze timestep sampling behavior"""
     print(f"\n🔍 DEBUG: Timestep Sampling Analysis")
     print(f"Method: {method}")
     print(f"t_intervals shape: {t_intervals.shape}")
@@ -48,7 +47,6 @@ def debug_timestep_sampling(t_intervals, batch_size, method="antithetic"):
     print(f"t_intervals values: {t_intervals.cpu().numpy()}")
     
     if method == "antithetic":
-        # Your current method
         n = batch_size
         idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
         idx_2 = len(t_intervals) - idx_1 - 1
@@ -63,7 +61,6 @@ def debug_timestep_sampling(t_intervals, batch_size, method="antithetic"):
         print(f"  t range: [{t.min()}, {t.max()}]")
         
     elif method == "simple":
-        # Simple random sampling
         idx = torch.randint(0, len(t_intervals), size=(batch_size,))
         t = t_intervals[idx]
         
@@ -76,9 +73,7 @@ def debug_timestep_sampling(t_intervals, batch_size, method="antithetic"):
 
 
 def debug_loss_components_detailed(model, inputs, targets, t, e, betas, target_idx):
-    """
-    Detailed debugging of loss computation to match the debug script
-    """
+    """Detailed debugging of loss computation"""
     print(f"\n🔍 DEBUG: Loss Computation Details")
     print(f"Inputs shape: {inputs.shape}, range: [{inputs.min():.3f}, {inputs.max():.3f}]")
     print(f"Targets shape: {targets.shape}, range: [{targets.min():.3f}, {targets.max():.3f}]")
@@ -86,7 +81,7 @@ def debug_loss_components_detailed(model, inputs, targets, t, e, betas, target_i
     print(f"Noise range: [{e.min():.3f}, {e.max():.3f}]")
     print(f"Target idx: {target_idx}")
     
-    # Step-by-step loss computation (mirroring the actual loss function)
+    # Step-by-step loss computation
     a = (1-betas).cumprod(dim=0)
     print(f"Alpha cumprod range: [{a.min():.6f}, {a.max():.6f}]")
     
@@ -94,8 +89,8 @@ def debug_loss_components_detailed(model, inputs, targets, t, e, betas, target_i
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
     print(f"Selected alpha: {a.squeeze().cpu().numpy()}")
     
-    # Check noise scaling (this is critical)
-    e_scaled = e * 0.01  # Current scaling in loss function
+    # Check noise scaling
+    e_scaled = e * 0.01
     print(f"Scaled noise range: [{e_scaled.min():.6f}, {e_scaled.max():.6f}]")
     
     # Forward diffusion
@@ -111,81 +106,116 @@ def debug_loss_components_detailed(model, inputs, targets, t, e, betas, target_i
 
 
 def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4):
-    """Generate samples and log them to W&B"""
+    """Fixed sample generation and W&B logging"""
     model.eval()
     
     with torch.no_grad():
-        # Get a batch from validation set
-        sample_batch = next(iter(val_loader))
-        inputs = sample_batch['input'][:num_samples].to(device)
-        targets = sample_batch['target'][:num_samples].unsqueeze(1).to(device)
-        target_idx = sample_batch['target_idx'][0].item()
-        
-        # Generate samples using the reverse process
         try:
-            # Create initial noise for the target modality
-            x_target_noise = torch.randn_like(targets)  # [B, 1, H, W, D] 
+            # Get a batch from validation set with proper batch size handling
+            val_iter = iter(val_loader)
+            sample_batches = []
             
-            # Call with correct parameter order
-            generated_sequence, x0_preds = unified_4to1_generalized_steps_3d(
-                x=x_target_noise,
-                x_available=inputs,
-                target_idx=target_idx, 
-                seq=t_intervals.cpu().numpy(),
-                model=model,
-                b=betas
-            )
+            # Collect enough samples (val_loader might have batch_size=1)
+            for _ in range(min(num_samples, len(val_loader))):
+                try:
+                    batch = next(val_iter)
+                    sample_batches.append(batch)
+                except StopIteration:
+                    break
             
-            # Get the final generated sample
-            generated = generated_sequence[-1] if generated_sequence else None
+            if not sample_batches:
+                logging.warning("No validation batches available for sampling")
+                return
             
-            # Debug the generated output
-            if generated is not None:
-                logging.info(f"Generated samples shape: {generated.shape}")
-                logging.info(f"Generated range: [{generated.min():.3f}, {generated.max():.3f}]")
-            else:
-                logging.warning("Generated samples is None")
-            
-            # Create comparison images (take middle slice for visualization)
-            middle_slice = inputs.size(-1) // 2
-            
-            # Prepare images for logging
+            # Process each sample individually
             images_to_log = []
             
-            for i in range(min(num_samples, 4)):  # Log up to 4 samples
-                # Original input (take first channel that's not the target)
-                available_channels = [j for j in range(4) if j != target_idx]
-                input_img = inputs[i, available_channels[0], :, :, middle_slice].cpu().numpy()
+            for i, batch in enumerate(sample_batches):
+                inputs = batch['input'][:1].to(device)  # Take first sample from batch
+                targets = batch['target'][:1].unsqueeze(1).to(device)
+                target_idx = batch['target_idx'][0].item()
+                
+                # Generate samples using the reverse process
+                x_target_noise = torch.randn_like(targets)
+                
+                generated_sequence, x0_preds = unified_4to1_generalized_steps_3d(
+                    x=x_target_noise,
+                    x_available=inputs,
+                    target_idx=target_idx, 
+                    seq=t_intervals.cpu().numpy(),
+                    model=model,
+                    b=betas
+                )
+                
+                # Get the final generated sample
+                generated = generated_sequence[-1] if generated_sequence else None
+                
+                # Debug the generated output
+                if generated is not None:
+                    logging.info(f"Sample {i}: Generated shape: {generated.shape}, range: [{generated.min():.3f}, {generated.max():.3f}]")
+                else:
+                    logging.warning(f"Sample {i}: Generated samples is None")
+                    continue
+                
+                # Create comparison images (take middle slice for visualization)
+                middle_slice = inputs.size(-1) // 2
+                
+                # Find available channels (non-target channels with actual data)
+                available_channels = []
+                for j in range(4):
+                    if j != target_idx and torch.sum(inputs[0, j] > 0) > 100:  # Has significant data
+                        available_channels.append(j)
+                
+                if not available_channels:
+                    available_channels = [j for j in range(4) if j != target_idx]  # Fallback
+                
+                # Original input (take first available non-target channel)
+                input_img = inputs[0, available_channels[0], :, :, middle_slice].cpu().numpy()
                 
                 # Ground truth target
-                target_img = targets[i, 0, :, :, middle_slice].cpu().numpy()
+                target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
                 
                 # Generated sample
-                if generated is not None:
-                    gen_img = generated[i, 0, :, :, middle_slice].cpu().numpy()
-                else:
-                    gen_img = np.zeros_like(target_img)
+                gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
                 
                 # Normalize for display
-                input_img = (input_img - input_img.min()) / (input_img.max() - input_img.min() + 1e-8)
-                target_img = (target_img - target_img.min()) / (target_img.max() - target_img.min() + 1e-8)
-                gen_img = (gen_img - gen_img.min()) / (gen_img.max() - gen_img.min() + 1e-8)
+                def safe_normalize(img):
+                    img_min, img_max = img.min(), img.max()
+                    if img_max > img_min:
+                        return (img - img_min) / (img_max - img_min)
+                    else:
+                        return np.zeros_like(img)
+                
+                input_img = safe_normalize(input_img)
+                target_img = safe_normalize(target_img)
+                gen_img = safe_normalize(gen_img)
                 
                 # Create side-by-side comparison
                 comparison = np.concatenate([input_img, target_img, gen_img], axis=1)
                 
+                modality_names = ['t1n', 't1c', 't2w', 't2f']
+                available_mod = modality_names[available_channels[0]]
+                target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
+                
                 images_to_log.append(wandb.Image(
                     comparison,
-                    caption=f"Sample {i+1}: Input | Target | Generated (Target: {sample_batch['target_modality'][i]})"
+                    caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
                 ))
+                
+                # Only log up to num_samples
+                if len(images_to_log) >= num_samples:
+                    break
             
             # Log to W&B
-            wandb.log({
-                "samples/generated_images": images_to_log,
-                "samples/step": global_step
-            }, step=global_step)
-            
-            logging.info(f"Generated and logged {len(images_to_log)} samples to W&B")
+            if images_to_log:
+                wandb.log({
+                    "samples/generated_images": images_to_log,
+                    "samples/step": global_step
+                }, step=global_step)
+                
+                logging.info(f"Generated and logged {len(images_to_log)} samples to W&B")
+            else:
+                logging.warning("No valid samples generated for W&B logging")
             
         except Exception as e:
             logging.warning(f"Failed to generate samples: {str(e)}")
@@ -195,9 +225,50 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
     model.train()
 
 
+def debug_dataset_consistency(batch, batch_idx):
+    """Debug function to check dataset loading consistency"""
+    print(f"\n🔍 DEBUG: Dataset Consistency Check (Batch {batch_idx})")
+    
+    inputs = batch['input']
+    target_idx = batch['target_idx'][0].item()
+    available_modalities = batch.get('available_modalities', [['unknown']])[0]
+    target_modality = batch.get('target_modality', ['unknown'])[0]
+    
+    print(f"Reported available modalities: {available_modalities}")
+    print(f"Target modality: {target_modality} (idx: {target_idx})")
+    
+    # Check which channels actually have data
+    modality_names = ['t1n', 't1c', 't2w', 't2f']
+    channels_with_data = []
+    
+    for i in range(4):
+        channel_data = inputs[0, i]
+        non_zero_count = torch.sum(channel_data > 0).item()
+        total_voxels = channel_data.numel()
+        percentage = (non_zero_count / total_voxels) * 100
+        
+        print(f"  Channel {i} ({modality_names[i]}): {non_zero_count}/{total_voxels} ({percentage:.1f}%) non-zero voxels")
+        
+        if non_zero_count > total_voxels * 0.01:  # >1% non-zero considered as having data
+            channels_with_data.append(modality_names[i])
+            print(f"    -> Has significant data: range [{channel_data.min():.3f}, {channel_data.max():.3f}]")
+        else:
+            print(f"    -> Minimal/no data (likely target channel set to zeros)")
+    
+    print(f"Channels with actual data: {channels_with_data}")
+    
+    # Check consistency
+    if len(channels_with_data) == 3:  # Expected: 3 input + 1 target (set to zeros)
+        print(f"✅ Dataset loading appears consistent (3 channels with data, 1 target set to zeros)")
+    else:
+        print(f"⚠️  Potential inconsistency: Expected 3 channels with data, found {len(channels_with_data)}")
+    
+    return channels_with_data
+
+
 def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, scaler, 
                        betas, t_intervals, config, args, device):
-    """🔥 DEBUG: Enhanced training loop with debugging steps"""
+    """Enhanced training loop with improved debugging"""
     
     # Setup W&B if requested
     use_wandb = False
@@ -244,34 +315,20 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 targets = batch['target'].unsqueeze(1).to(device)
                 target_idx = batch['target_idx'][0].item()
                 
-                # 🔍 DEBUG STEP 1: First batch detailed analysis
+                # Enhanced debugging for first batch
                 if epoch == 0 and batch_idx == 0:
                     print(f"\n=== FIRST BATCH DETAILED DEBUG ===")
                     print(f"Input tensor shape: {inputs.shape}")
                     print(f"Target tensor shape: {targets.shape}")
                     print(f"Input range: [{inputs.min():.3f}, {inputs.max():.3f}]")
                     print(f"Target range: [{targets.min():.3f}, {targets.max():.3f}]")
-                    print(f"Target modality: {batch['target_modality'][0]}")
-                    print(f"Available modalities: {batch['available_modalities'][0]}")
                     
-                    print(f"\n=== TRAINING BATCH DEBUG ===")
-                    print(f"Batch case name: {batch['case_name'][0]}")
-                    print(f"Successful modalities should be: ['t1n', 't1c', 't2w', 't2f']")
-                    print(f"But available_modalities shows: {batch['available_modalities'][0]}")
-                    print(f"This suggests only {len(batch['available_modalities'][0])} modalities loaded for training")
-                    print(f"Target modality: {batch['target_modality'][0]}")
-                    print(f"Target idx: {batch['target_idx'][0].item()}")
-                    
-                    print(f"\nInput tensor analysis:")
-                    for i in range(4):
-                        channel_data = inputs[0, i]
-                        non_zero_count = torch.sum(channel_data > 0).item()
-                        total_voxels = channel_data.numel()
-                        print(f"  Channel {i} ({['t1n', 't1c', 't2w', 't2f'][i]}): {non_zero_count}/{total_voxels} non-zero voxels")
-                        if non_zero_count == 0:
-                            print(f"    -> Channel {i} is all zeros (target or missing)")
-                        else:
-                            print(f"    -> Channel {i} has data: range [{channel_data.min():.3f}, {channel_data.max():.3f}]")
+                    # Check dataset consistency
+                    channels_with_data = debug_dataset_consistency(batch, batch_idx)
+                
+                # Periodic dataset consistency checks
+                if batch_idx in [1, 2, 10, 50, 100]:  # Check specific batches
+                    debug_dataset_consistency(batch, batch_idx)
                 
                 # Enhanced input validation
                 if torch.isnan(inputs).any() or torch.isnan(targets).any():
@@ -284,18 +341,16 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 
                 n = inputs.size(0)
                 
-                # 🔍 DEBUG STEP 2: Timestep sampling analysis
-                if epoch == 0 and batch_idx <= 2:  # Debug first few batches
+                # Timestep sampling
+                if epoch == 0 and batch_idx <= 2:
                     t = debug_timestep_sampling(t_intervals, n, method=args.timestep_method)
                     t = t.to(device)
                 else:
-                    # Use specified timestep sampling method
                     if args.timestep_method == "simple":
-                        # Simple random sampling (like debug script)
                         idx = torch.randint(0, len(t_intervals), size=(n,))
                         t = t_intervals[idx].to(device)
                     else:
-                        # Fast-DDPM antithetic sampling (original method)
+                        # Fast-DDPM antithetic sampling
                         idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
                         idx_2 = len(t_intervals) - idx_1 - 1
                         idx = torch.cat([idx_1, idx_2], dim=0)[:n]
@@ -303,18 +358,16 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 
                 e = torch.randn_like(targets)
                 
-                # 🔍 DEBUG STEP 3: Detailed loss computation analysis
+                # Detailed loss computation analysis for first batch
                 if epoch == 0 and batch_idx == 0:
                     model_input_debug, e_scaled_debug = debug_loss_components_detailed(
                         model, inputs, targets, t, e, betas, target_idx
                     )
                 
-                # 🔍 DEBUG STEP 4: Test with and without mixed precision
+                # Compute loss
                 if args.no_mixed_precision:
-                    # No mixed precision (like debug script)
                     loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                 else:
-                    # With mixed precision (original)
                     with autocast():
                         loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                 
@@ -323,7 +376,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     logging.warning(f"Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
                     continue
                 
-                # 🔍 DEBUG STEP 5: Log loss value for first few batches
+                # Log loss for first few batches
                 if epoch == 0 and batch_idx <= 5:
                     print(f"Batch {batch_idx}: Loss = {loss.item():.6f}")
                 
@@ -333,7 +386,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 else:
                     scaler.scale(loss).backward()
                 
-                # Check gradients before clipping
+                # Check gradients
                 total_norm = 0
                 max_grad = 0
                 for p in model.parameters():
@@ -343,20 +396,19 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                         max_grad = max(max_grad, p.grad.abs().max().item())
                 total_norm = total_norm ** (1. / 2)
                 
-                # 🔍 DEBUG STEP 6: Detailed gradient analysis for first few batches
+                # Detailed gradient analysis for first few batches
                 if epoch == 0 and batch_idx <= 5:
                     print(f"Batch {batch_idx}: Gradient norm = {total_norm:.3f}, Max grad = {max_grad:.6f}")
                     
-                    if total_norm > 10:  # Lower threshold for debugging
+                    if total_norm > 10:
                         print(f"🚨 Large gradients detected in batch {batch_idx}!")
-                        # Print which layers have large gradients
                         for name, param in model.named_parameters():
                             if param.grad is not None:
                                 grad_norm = param.grad.norm().item()
                                 if grad_norm > 1.0:
                                     print(f"  {name}: {grad_norm:.3f}")
                 
-                # Gradient explosion check with configurable threshold
+                # Gradient explosion check
                 gradient_threshold = getattr(args, 'gradient_threshold', 50)
                 if total_norm > gradient_threshold:
                     logging.warning(f"Large gradient norm detected: {total_norm:.3f}, skipping batch")
@@ -421,7 +473,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                                f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
                                f'Grad: {total_norm:.3f}')
                 
-                # Early stopping for debugging (process only first few batches)
+                # Early stopping for debugging
                 if args.debug_early_stop and batch_idx >= args.debug_early_stop:
                     logging.info(f"Early stopping for debugging after {batch_idx+1} batches")
                     break
@@ -452,10 +504,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
         else:
             logging.warning(f'Epoch {epoch+1} - No valid batches processed!')
         
-        # Generate and log samples periodically
-        if use_wandb and global_step % args.sample_every == 0:
-            generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4)
-        
         # Early exit for debugging
         if args.debug_early_stop:
             logging.info("Early exit for debugging after 1 epoch")
@@ -474,8 +522,8 @@ def parse_args():
     parser.add_argument('--config', type=str, default='configs/fast_ddpm_3d.yml', help='Path to config file')
     parser.add_argument('--data_root', type=str, required=True, help='Path to BraTS data')
     parser.add_argument('--exp', type=str, default='./experiments', help='Experiment directory')
-    parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats_debug', help='Experiment name')
-    parser.add_argument('--timesteps', type=int, default=10, help='Number of timesteps (Fast-DDPM advantage)')
+    parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats_debug_fixed', help='Experiment name')
+    parser.add_argument('--timesteps', type=int, default=10, help='Number of timesteps')
     parser.add_argument('--scheduler_type', type=str, default='uniform', choices=['uniform', 'non-uniform'], help='Timestep scheduler')
     parser.add_argument('--gpu', type=int, default=0, help='GPU ID')
     parser.add_argument('--resume', action='store_true', help='Resume training')
@@ -483,14 +531,14 @@ def parse_args():
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
     parser.add_argument('--log_every_n_steps', type=int, default=1, help='Log training progress every N steps')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
-    parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats-debug', help='W&B project name')
-    parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity (username or team)')
-    parser.add_argument('--sample_every', type=int, default=2000, help='Generate and log sample images to W&B every N steps')
+    parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats-debug-fixed', help='W&B project name')
+    parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity')
+    parser.add_argument('--sample_every', type=int, default=2000, help='Generate samples every N steps')
     
-    # 🔍 DEBUG-specific arguments
-    parser.add_argument('--no_mixed_precision', action='store_true', help='Disable mixed precision training (like debug script)')
+    # Debug-specific arguments
+    parser.add_argument('--no_mixed_precision', action='store_true', help='Disable mixed precision training')
     parser.add_argument('--timestep_method', type=str, default='antithetic', choices=['antithetic', 'simple'], 
-                       help='Timestep sampling method: antithetic (original) or simple (like debug)')
+                       help='Timestep sampling method')
     parser.add_argument('--gradient_threshold', type=float, default=50.0, help='Gradient explosion threshold')
     parser.add_argument('--clip_norm', type=float, default=1.0, help='Gradient clipping norm')
     parser.add_argument('--debug_early_stop', type=int, default=None, help='Stop after N batches for debugging')
@@ -516,7 +564,7 @@ def setup_datasets(args, config):
     )
     
     if args.debug:
-        debug_train_size = min(10, len(train_dataset))  # Very small for debugging
+        debug_train_size = min(10, len(train_dataset))
         debug_val_size = min(5, len(val_dataset))
         train_indices = list(range(debug_train_size))
         val_indices = list(range(debug_val_size))
@@ -533,14 +581,14 @@ def setup_dataloaders(train_dataset, val_dataset, config):
         train_dataset, 
         batch_size=config.training.batch_size,
         shuffle=True,
-        num_workers=getattr(config.data, 'num_workers', 2),  # Reduced for debugging
+        num_workers=getattr(config.data, 'num_workers', 2),
         pin_memory=True,
         drop_last=True
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=1,  # Keep batch size 1 for validation
         shuffle=False,
         num_workers=1,
         pin_memory=True
@@ -564,7 +612,6 @@ def setup_model_and_optimizer(config, device):
     logging.info(f"Total parameters: {total_params:,}")
     logging.info(f"Trainable parameters: {trainable_params:,}")
     
-    # Optimizer and scheduler
     optimizer = torch.optim.Adam(
         model.parameters(), 
         lr=config.training.learning_rate,
@@ -594,7 +641,6 @@ def setup_diffusion_and_scaler(config, device, args):
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
     
-    # Initialize gradient scaler (only if using mixed precision)
     scaler = GradScaler() if not args.no_mixed_precision else None
     
     return betas, t_intervals, scaler
@@ -608,7 +654,7 @@ def setup_logging(log_dir):
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(log_dir, 'training_debug.log')),
+            logging.FileHandler(os.path.join(log_dir, 'training_debug_fixed.log')),
             logging.StreamHandler()
         ]
     )
@@ -654,7 +700,7 @@ def main():
     # Setup diffusion and gradient scaler
     betas, t_intervals, scaler = setup_diffusion_and_scaler(config, device, args)
     
-    # 🔍 DEBUG: Print diffusion setup
+    # Debug diffusion setup
     print(f"\n🔍 DIFFUSION SETUP DEBUG:")
     print(f"Beta schedule: {config.diffusion.beta_schedule}")
     print(f"Beta range: [{config.diffusion.beta_start}, {config.diffusion.beta_end}]")
@@ -662,7 +708,7 @@ def main():
     print(f"Fast-DDPM timesteps: {args.timesteps}")
     print(f"t_intervals: {t_intervals.cpu().numpy()}")
     
-    # Use debug training loop
+    # Run debug training loop
     training_loop_debug(
         model, train_loader, val_loader, optimizer, scheduler, scaler,
         betas, t_intervals, config, args, device
