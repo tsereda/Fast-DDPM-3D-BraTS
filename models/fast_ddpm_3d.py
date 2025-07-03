@@ -20,8 +20,8 @@ def get_timestep_embedding(timesteps, embedding_dim):
 
 
 def nonlinearity(x):
-    # 🔥 FIXED: Use ReLU instead of Swish to prevent gradient explosion
-    return F.relu(x)
+    # Swish activation for improved expressivity
+    return x * torch.sigmoid(x)
 
 
 def Normalize(in_channels, num_groups=32):
@@ -139,44 +139,6 @@ class ResnetBlock3D(nn.Module):
         return x + h
 
 
-class AttnBlock3D(nn.Module):
-    """3D self-attention block for medical image diffusion"""
-    def __init__(self, in_channels):
-        super().__init__()
-        self.in_channels = in_channels
-
-        self.norm = Normalize(in_channels)
-        self.q = nn.Conv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.k = nn.Conv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.v = nn.Conv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.proj_out = nn.Conv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x):
-        h_ = x
-        h_ = self.norm(h_)
-        q = self.q(h_)
-        k = self.k(h_)
-        v = self.v(h_)
-
-        # Compute attention
-        b, c, h, w, d = q.shape
-        q = q.reshape(b, c, h*w*d)
-        q = q.permute(0, 2, 1)   # b,hw,c
-        k = k.reshape(b, c, h*w*d) # b,c,hw
-        w_ = torch.bmm(q, k)     # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
-        w_ = w_ * (int(c)**(-0.5))
-        w_ = F.softmax(w_, dim=2)
-
-        # Apply attention
-        v = v.reshape(b, c, h*w*d)
-        w_ = w_.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
-        h_ = torch.bmm(v, w_)     # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
-        h_ = h_.reshape(b, c, h, w, d)
-
-        h_ = self.proj_out(h_)
-
-        return x + h_
-
 class FastDDPM3D(nn.Module):
     """3D Fast-DDPM for unified 4->1 BraTS modality synthesis"""
     
@@ -189,7 +151,7 @@ class FastDDPM3D(nn.Module):
         num_res_blocks = config.model.num_res_blocks
         dropout = config.model.dropout
         in_channels = config.model.in_channels
-        resolution = config.data.crop_size[0]  # Updated to use crop_size
+        resolution = config.data.volume_size[0] if hasattr(config.data, 'volume_size') else config.data.crop_size[0]
         resamp_with_conv = config.model.resamp_with_conv
         
         # Always use fixed variance for 3D
@@ -210,9 +172,6 @@ class FastDDPM3D(nn.Module):
             nn.Linear(self.temb_ch, self.temb_ch),
         ])
 
-        # Get attention resolutions
-        attn_resolutions = getattr(config.model, 'attn_resolutions', [])
-
         # Downsampling
         self.conv_in = nn.Conv3d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
 
@@ -222,7 +181,6 @@ class FastDDPM3D(nn.Module):
         
         for i_level in range(self.num_resolutions):
             block = nn.ModuleList()
-            attn = nn.ModuleList()
             block_in = ch * in_ch_mult[i_level]
             block_out = ch * ch_mult[i_level]
             
@@ -234,15 +192,9 @@ class FastDDPM3D(nn.Module):
                     dropout=dropout
                 ))
                 block_in = block_out
-                # Add attention if resolution matches
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock3D(block_in))
-                else:
-                    attn.append(nn.Identity())
-                    
+                
             down = nn.Module()
             down.block = block
-            down.attn = attn
             if i_level != self.num_resolutions - 1:
                 down.downsample = Downsample3D(block_in, resamp_with_conv)
                 curr_res = curr_res // 2
@@ -256,7 +208,6 @@ class FastDDPM3D(nn.Module):
             temb_channels=self.temb_ch,
             dropout=dropout
         )
-        self.mid.attn_1 = AttnBlock3D(block_in)
         self.mid.block_2 = ResnetBlock3D(
             in_channels=block_in,
             out_channels=block_in,
@@ -268,7 +219,6 @@ class FastDDPM3D(nn.Module):
         self.up = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
-            attn = nn.ModuleList()
             block_out = ch * ch_mult[i_level]
             skip_in = ch * ch_mult[i_level]
             
@@ -283,15 +233,9 @@ class FastDDPM3D(nn.Module):
                     dropout=dropout
                 ))
                 block_in = block_out
-                # Add attention if resolution matches
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock3D(block_in))
-                else:
-                    attn.append(nn.Identity())
-                    
+                
             up = nn.Module()
             up.block = block
-            up.attn = attn
             if i_level != 0:
                 up.upsample = Upsample3D(block_in, resamp_with_conv)
                 curr_res = curr_res * 2
@@ -300,9 +244,6 @@ class FastDDPM3D(nn.Module):
         # Output
         self.norm_out = Normalize(block_in)
         self.conv_out = nn.Conv3d(block_in, self.out_channels, kernel_size=3, stride=1, padding=1)
-        
-        # 🔥 CRITICAL: Apply proper weight initialization AFTER building the model
-        self._init_weights()
 
     def forward(self, x, t):
         # x shape: [B, 4, H, W, D] for unified 4->1 input
@@ -319,7 +260,6 @@ class FastDDPM3D(nn.Module):
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
-                h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
             if i_level != self.num_resolutions - 1:
                 hs.append(self.down[i_level].downsample(hs[-1]))
@@ -327,7 +267,6 @@ class FastDDPM3D(nn.Module):
         # Middle
         h = hs[-1]
         h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
         h = self.mid.block_2(h, temb)
 
         # Upsampling
@@ -335,7 +274,6 @@ class FastDDPM3D(nn.Module):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](
                     torch.cat([h, hs.pop()], dim=1), temb)
-                h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
@@ -346,25 +284,3 @@ class FastDDPM3D(nn.Module):
         
         # 🔥 REMOVED sigmoid activation - diffusion models predict noise, not images
         return h
-    
-    def _init_weights(self):
-        """
-        Improved weight initialization for diffusion models:
-        - He initialization for all Conv3d and Linear layers (since we use ReLU)
-        - GroupNorm weights to 1, bias to 0
-        - Final conv_out layer: very small std
-        - (Optional) Timestep embedding layers: smaller std if desired
-        """
-        for name, module in self.named_modules():
-            if isinstance(module, (nn.Conv3d, nn.Linear)):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.GroupNorm):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
-        # Most critical: Final output layer very small
-        if hasattr(self, 'conv_out'):
-            nn.init.normal_(self.conv_out.weight, mean=0.0, std=0.001)
-            if self.conv_out.bias is not None:
-                nn.init.constant_(self.conv_out.bias, 0)

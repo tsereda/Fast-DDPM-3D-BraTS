@@ -30,14 +30,6 @@ class BraTS3DUnifiedDataset(Dataset):
         # Standard BraTS modalities
         self.modalities = ['t1n', 't1c', 't2w', 't2f']
         
-        # Global normalization statistics
-        self.global_stats = {
-            't1n': {'min': 0.0, 'max': 4900.4},
-            't1c': {'min': 0.0, 'max': 9532.3},
-            't2w': {'min': 0.0, 'max': 5373.3},
-            't2f': {'min': 0.0, 'max': 3201.0}
-        }
-        
         # Find all case directories
         self.cases = self._find_cases()
         
@@ -170,31 +162,15 @@ class BraTS3DUnifiedDataset(Dataset):
         
         return crop
     
-    def _normalize_volume_0_1(self, volume, modality=None):
-        """Min-max normalization to [0, 1] using global statistics"""
-        # Handle zero or constant volumes
+    def _normalize_volume(self, volume):
+        """Normalize to [-1, 1] range"""
         if not np.any(volume > 0):
             return np.zeros_like(volume)
-        
-        if modality is not None and modality in self.global_stats:
-            global_min = self.global_stats[modality]['min']
-            global_max = self.global_stats[modality]['max']
-        else:
-            global_min = 0.0
-            global_max = np.percentile(volume[volume > 0], 99.9)
-        
-        if global_max <= global_min:
-            return np.zeros_like(volume)
-        
-        # Global min-max normalization to [0, 1]
-        volume_norm = (volume - global_min) / (global_max - global_min)
-        
-        # Validate normalization
-        if np.any(np.isnan(volume_norm)) or np.any(np.isinf(volume_norm)):
-            logger.warning("NaN/Inf values detected after normalization, using zero volume")
-            return np.zeros_like(volume)
-        
-        return np.clip(volume_norm, 0.0, 1.0)
+        v_min = np.amin(volume)
+        v_max = np.amax(volume)
+        if v_max > v_min:
+            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
+        return np.clip(volume, -1.0, 1.0)
     
     def __len__(self):
         return len(self.samples)
@@ -239,7 +215,7 @@ class BraTS3DUnifiedDataset(Dataset):
             for modality in self.modalities:
                 volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
                 resized = self._resize_volume(volume, target_size)
-                normalized = self._normalize_volume_0_1(resized, modality=modality)
+                normalized = self._normalize_volume(resized)
                 processed_volumes[modality] = torch.FloatTensor(normalized)
         else:
             # Patch mode: extract random crops
@@ -249,7 +225,7 @@ class BraTS3DUnifiedDataset(Dataset):
             for modality in self.modalities:
                 volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
                 cropped = self._extract_crop(volume, crop_coords)
-                normalized = self._normalize_volume_0_1(cropped, modality=modality)
+                normalized = self._normalize_volume(cropped)
                 processed_volumes[modality] = torch.FloatTensor(normalized)
         
         # Select target modality from successfully loaded modalities
@@ -279,20 +255,14 @@ class BraTS3DUnifiedDataset(Dataset):
             # Target was not successfully loaded (missing file)
             display_available_modalities = available_non_target_modalities.copy()
         
-        # Validation
-        assert input_modalities.shape == (4, *target_size)
-        assert target_volume.shape == target_size
-        assert torch.all(input_modalities >= 0) and torch.all(input_modalities <= 1)
-        assert torch.all(target_volume >= 0) and torch.all(target_volume <= 1)
-        
         return {
-            'input': input_modalities,      # [4, H, W, D] with target as ZEROS, range [0,1]
-            'target': target_volume,        # [H, W, D] target modality, range [0,1]
+            'input': input_modalities,      # [4, H, W, D] with target as ZEROS, range [-1,1]
+            'target': target_volume,        # [H, W, D] target modality, range [-1,1]
             'target_idx': target_idx,
             'case_name': case_dir.name,
             'target_modality': target_modality,
-            'available_modalities': display_available_modalities,  # FIXED: Now correctly shows non-target modalities
-            'successfully_loaded_modalities': successfully_loaded_modalities,  # NEW: Shows all loaded modalities
+            'available_modalities': display_available_modalities,
+            'successfully_loaded_modalities': successfully_loaded_modalities,
             'crop_coords': crop_coords if not self.use_full_volumes else None,
             'processing_mode': 'full_volume' if self.use_full_volumes else 'patch'
         }
