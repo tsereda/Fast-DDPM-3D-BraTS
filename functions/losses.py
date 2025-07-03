@@ -21,8 +21,8 @@ def brats_4to1_loss(model,
     a = torch.clamp(a, min=1e-8, max=1.0)
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
     
-    # 🔥 NUCLEAR FIX: Scale noise way down for [0,1] data to prevent 200k+ gradient explosion
-    e_scaled = e * 0.001  # Changed from 0.01 to 0.001 - ultra small noise
+    # 🔥 NUCLEAR FIX: Scale noise down for [0,1] data to prevent gradient explosion
+    e_scaled = e * 0.01  # Increased from 0.001 to 0.01 for better gradient flow
     
     # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
     x_noisy = x_target * a.sqrt() + e_scaled * (1.0 - a).sqrt()
@@ -37,9 +37,8 @@ def brats_4to1_loss(model,
     # Model predicts noise
     output = model(model_input, t.float())
     
-    # 🔥 ADDITIONAL FIX: Clamp loss to prevent extreme values
+    # Compute loss without clamping to see actual values
     loss_raw = (e_scaled - output).square()
-    loss_raw = torch.clamp(loss_raw, max=1.0)  # Cap loss at 1.0
     
     # Use mean for proper loss scaling instead of sum
     if keepdim:
@@ -65,8 +64,8 @@ def improved_brats_4to1_loss(model,
     a = torch.clamp(a, min=1e-6, max=0.9999)
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
     
-    # 🔥 NUCLEAR FIX: Scale noise way down
-    e_scaled = e * 0.001  # Changed from 0.01 to 0.001
+    # 🔥 NUCLEAR FIX: Scale noise down
+    e_scaled = e * 0.01  # Increased from 0.001 to 0.01 for better gradient flow
     
     # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
     a_sqrt = torch.clamp(a.sqrt(), min=1e-3, max=0.999)
@@ -84,9 +83,8 @@ def improved_brats_4to1_loss(model,
     # Model predicts noise
     output = model(model_input, t.float())
     
-    # Compute MSE loss with clamping
+    # Compute MSE loss without clamping
     mse_loss = (e_scaled - output).square()
-    mse_loss = torch.clamp(mse_loss, max=1.0)  # Cap loss
     
     # Apply focal weighting to focus on harder timesteps
     timestep_weights = 1.0 + 0.5 * (t.float() / 1000.0).view(-1, 1, 1, 1, 1)

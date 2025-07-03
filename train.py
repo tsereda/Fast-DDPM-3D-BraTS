@@ -292,8 +292,8 @@ def training_loop_fixed(model, train_loader, val_loader, optimizer, scheduler, s
                     logging.warning(f"Skipping batch {batch_idx} due to Inf values in input")
                     continue
                 
-                # Check for reasonable value ranges
-                if inputs.min() < -10 or inputs.max() > 10:
+                # Check for reasonable value ranges - relaxed thresholds
+                if inputs.min() < -50 or inputs.max() > 50:
                     logging.warning(f"Skipping batch {batch_idx} due to extreme input values: [{inputs.min():.3f}, {inputs.max():.3f}]")
                     continue
                 
@@ -327,15 +327,15 @@ def training_loop_fixed(model, train_loader, val_loader, optimizer, scheduler, s
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** (1. / 2)
                 
-                # 🔥 CRITICAL FIX: Much stricter gradient check for 3D medical imaging
-                if total_norm > 10:  # Much stricter threshold
+                # 🔥 CRITICAL FIX: Stricter gradient check for 3D medical imaging  
+                if total_norm > 50:  # Relaxed threshold
                     logging.warning(f"Large gradient norm detected: {total_norm:.3f}, skipping batch")
                     optimizer.zero_grad()
                     continue
                 
-                # 🔥 MUCH MORE AGGRESSIVE gradient clipping for 3D stability
+                # 🔥 Relaxed gradient clipping for better gradient flow
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)  # Much stricter clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Relaxed clipping
                 
                 # Optimizer step
                 scaler.step(optimizer)

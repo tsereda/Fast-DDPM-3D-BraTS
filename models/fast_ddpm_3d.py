@@ -354,16 +354,14 @@ class FastDDPM3D(nn.Module):
         """
         for name, module in self.named_modules():
             if isinstance(module, nn.Conv3d):
-                # He initialization for Conv3d with very small gain for stability
+                # He initialization for Conv3d
                 nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                # Scale down weights significantly for 3D stability
-                module.weight.data *= 0.1
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
                     
             elif isinstance(module, nn.Linear):
-                # Xavier initialization for Linear layers with small gain
-                nn.init.xavier_normal_(module.weight, gain=0.1)
+                # Xavier initialization for Linear layers
+                nn.init.xavier_normal_(module.weight, gain=1.0)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
                     
