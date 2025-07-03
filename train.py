@@ -125,34 +125,56 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 # Generated sample
                 gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
                 
-                # Normalize for display
+                # Debug image shapes and values
+                print(f"🔍 Sample {i} debug:")
+                print(f"  Input shape: {input_img.shape}, range: [{input_img.min():.4f}, {input_img.max():.4f}]")
+                print(f"  Target shape: {target_img.shape}, range: [{target_img.min():.4f}, {target_img.max():.4f}]")
+                print(f"  Generated shape: {gen_img.shape}, range: [{gen_img.min():.4f}, {gen_img.max():.4f}]")
+                
+                # Normalize for display with more robust handling
                 def safe_normalize(img):
                     img_min, img_max = img.min(), img.max()
-                    if img_max > img_min:
+                    if img_max > img_min and not np.isnan(img_min) and not np.isnan(img_max):
                         normalized = (img - img_min) / (img_max - img_min)
                         # Ensure values are between 0 and 1
                         return np.clip(normalized, 0, 1)
                     else:
+                        # If all values are the same or NaN, create a black image
                         return np.zeros_like(img)
                 
-                input_img = safe_normalize(input_img)
-                target_img = safe_normalize(target_img)
-                gen_img = safe_normalize(gen_img)
+                input_img_norm = safe_normalize(input_img)
+                target_img_norm = safe_normalize(target_img)
+                gen_img_norm = safe_normalize(gen_img)
+                
+                print(f"  After normalization:")
+                print(f"    Input: [{input_img_norm.min():.4f}, {input_img_norm.max():.4f}]")
+                print(f"    Target: [{target_img_norm.min():.4f}, {target_img_norm.max():.4f}]")
+                print(f"    Generated: [{gen_img_norm.min():.4f}, {gen_img_norm.max():.4f}]")
                 
                 # Create side-by-side comparison
-                comparison = np.concatenate([input_img, target_img, gen_img], axis=1)
+                comparison = np.concatenate([input_img_norm, target_img_norm, gen_img_norm], axis=1)
+                
+                # Convert to proper format for W&B
+                comparison_uint8 = (comparison * 255).astype(np.uint8)
+                
+                # Verify the final image
+                print(f"  Final comparison shape: {comparison_uint8.shape}, range: [{comparison_uint8.min()}, {comparison_uint8.max()}]")
                 
                 modality_names = ['t1n', 't1c', 't2w', 't2f']
                 available_mod = modality_names[available_channels[0]]
                 target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
                 
-                # Ensure the image is in the right format for W&B (0-255 uint8)
-                comparison_uint8 = (comparison * 255).astype(np.uint8)
-                
-                images_to_log.append(wandb.Image(
-                    comparison_uint8,
-                    caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
-                ))
+                # Create W&B image with explicit format
+                try:
+                    wandb_img = wandb.Image(
+                        comparison_uint8,
+                        caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
+                    )
+                    images_to_log.append(wandb_img)
+                    print(f"  ✅ Successfully created wandb.Image for sample {i+1}")
+                except Exception as img_e:
+                    print(f"  ❌ Failed to create wandb.Image for sample {i+1}: {img_e}")
+                    continue
                 
                 # Only log up to num_samples
                 if len(images_to_log) >= num_samples:
@@ -160,26 +182,51 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
             
             # Log to W&B
             if images_to_log:
-                # Log individual images
-                wandb.log({
-                    "samples/generated_images": images_to_log,
-                    "samples/step": global_step,
-                    "samples/count": len(images_to_log)
-                }, step=global_step)
+                print(f"📤 Attempting to log {len(images_to_log)} images to W&B...")
                 
-                # Also create a combined figure for easier viewing
                 try:
-                    fig, axes = plt.subplots(len(images_to_log), 1, figsize=(15, 5*len(images_to_log)))
+                    # Log individual images with better error handling
+                    log_dict = {
+                        "samples/generated_images": images_to_log,
+                        "samples/step": global_step,
+                        "samples/count": len(images_to_log)
+                    }
+                    
+                    wandb.log(log_dict, step=global_step)
+                    print(f"  ✅ Successfully logged images to 'samples/generated_images'")
+                    
+                except Exception as wandb_e:
+                    print(f"  ❌ Failed to log images to W&B: {wandb_e}")
+                    # Try logging a simple test instead
+                    try:
+                        wandb.log({
+                            "debug/sample_generation_attempt": global_step,
+                            "debug/num_images_attempted": len(images_to_log)
+                        }, step=global_step)
+                        print(f"  ✅ Logged debug info instead")
+                    except Exception as debug_e:
+                        print(f"  ❌ Even debug logging failed: {debug_e}")
+                
+                # Also create matplotlib figure as backup
+                try:
+                    print("📊 Creating matplotlib figure as backup...")
+                    fig, axes = plt.subplots(1, len(images_to_log), figsize=(5*len(images_to_log), 5))
                     if len(images_to_log) == 1:
                         axes = [axes]
                     
                     for idx, img_data in enumerate(images_to_log):
-                        # Get the comparison image (already uint8)
-                        comparison = img_data._image if hasattr(img_data, '_image') else None
-                        if comparison is not None:
-                            axes[idx].imshow(comparison, cmap='gray')
-                            axes[idx].set_title(img_data.caption if hasattr(img_data, 'caption') else f"Sample {idx+1}")
-                            axes[idx].axis('off')
+                        # Extract the actual image data from wandb.Image
+                        if hasattr(img_data, '_image'):
+                            img_array = img_data._image
+                        elif hasattr(img_data, 'image'):
+                            img_array = img_data.image
+                        else:
+                            # Fallback: use the original comparison from the loop
+                            img_array = (comparison * 255).astype(np.uint8)
+                        
+                        axes[idx].imshow(img_array, cmap='gray')
+                        axes[idx].set_title(f"Sample {idx+1}")
+                        axes[idx].axis('off')
                     
                     plt.tight_layout()
                     
@@ -188,10 +235,12 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     }, step=global_step)
                     
                     plt.close(fig)
+                    print(f"  ✅ Successfully logged combined figure")
+                    
                 except Exception as fig_e:
-                    print(f"⚠️ Combined figure creation failed: {fig_e}")
+                    print(f"  ⚠️ Combined figure creation failed: {fig_e}")
                 
-                print(f"✅ Logged {len(images_to_log)} samples to W&B at step {global_step}")
+                print(f"✅ Sample logging completed for step {global_step}")
             else:
                 logging.warning("No valid samples generated for W&B logging")
             
@@ -199,17 +248,30 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
             logging.error(f"Failed to generate samples: {str(e)}")
             import traceback
             logging.error(f"Traceback: {traceback.format_exc()}")
+            
             # Try a simple test image to see if W&B image logging works
             try:
-                test_img = np.random.rand(64, 64) * 255
+                print("🧪 Testing basic W&B image logging...")
+                test_img = np.random.rand(64, 192) * 255  # 3 side-by-side 64x64 images
                 test_img = test_img.astype(np.uint8)
                 wandb.log({
                     "debug/test_image": wandb.Image(test_img, caption="Test image to verify W&B logging"),
-                    "debug/step": global_step
+                    "debug/step": global_step,
+                    "debug/error_message": str(e)
                 }, step=global_step)
                 print("✅ Test image logged to W&B successfully")
             except Exception as test_e:
                 print(f"❌ Even test image failed: {test_e}")
+                # Log basic metrics without images
+                try:
+                    wandb.log({
+                        "debug/sample_generation_failed": 1,
+                        "debug/failure_step": global_step,
+                        "debug/error": str(e)
+                    }, step=global_step)
+                    print("✅ Logged error info to W&B")
+                except Exception as metrics_e:
+                    print(f"❌ All W&B logging failed: {metrics_e}")
     
     model.train()
 
@@ -249,6 +311,9 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
     # Test W&B logging only
     if args.test_wandb_only:
         print("🧪 Testing W&B logging only...")
+        # Test basic image logging first
+        test_wandb_image_logging(1)
+        # Then test full sample generation
         generate_and_log_samples(model, val_loader, betas, t_intervals, device, 1)
         print("W&B test completed. Exiting...")
         if use_wandb:
@@ -387,6 +452,11 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     # Generate and log samples
                     if global_step % args.sample_every == 0 and global_step > 0:
                         print(f"🔄 Generating samples at step {global_step}")
+                        
+                        # First test basic W&B image logging
+                        if global_step == args.sample_every:  # Only on first sampling
+                            test_wandb_image_logging(global_step)
+                        
                         generate_and_log_samples(
                             model, val_loader, betas, t_intervals, device, global_step
                         )
@@ -614,6 +684,39 @@ def setup_logging(log_dir):
             logging.StreamHandler()
         ]
     )
+
+
+def test_wandb_image_logging(global_step):
+    """Test function to verify W&B image logging works"""
+    print("🧪 Testing W&B image logging functionality...")
+    
+    try:
+        # Create a simple test image
+        test_img = np.zeros((128, 384), dtype=np.uint8)  # 3 side-by-side 128x128 images
+        
+        # Fill with different patterns
+        test_img[:, :128] = 100  # Left section
+        test_img[:, 128:256] = 150  # Middle section  
+        test_img[:, 256:] = 200  # Right section
+        
+        # Add some pattern
+        test_img[::4, :] = 255  # White stripes
+        
+        # Create wandb image
+        wandb_test_img = wandb.Image(test_img, caption="Test pattern: Left | Middle | Right")
+        
+        # Log to wandb
+        wandb.log({
+            "test/simple_image": wandb_test_img,
+            "test/step": global_step
+        }, step=global_step)
+        
+        print("✅ Basic W&B image logging test passed!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ W&B image logging test failed: {e}")
+        return False
 
 
 def main():
