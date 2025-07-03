@@ -100,9 +100,7 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 generated = generated_sequence[-1] if generated_sequence else None
                 
                 # Debug the generated output
-                if generated is not None:
-                    logging.info(f"Sample {i}: Generated shape: {generated.shape}, range: [{generated.min():.3f}, {generated.max():.3f}]")
-                else:
+                if generated is None:
                     logging.warning(f"Sample {i}: Generated samples is None")
                     continue
                 
@@ -131,7 +129,9 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 def safe_normalize(img):
                     img_min, img_max = img.min(), img.max()
                     if img_max > img_min:
-                        return (img - img_min) / (img_max - img_min)
+                        normalized = (img - img_min) / (img_max - img_min)
+                        # Ensure values are between 0 and 1
+                        return np.clip(normalized, 0, 1)
                     else:
                         return np.zeros_like(img)
                 
@@ -146,8 +146,11 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 available_mod = modality_names[available_channels[0]]
                 target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
                 
+                # Ensure the image is in the right format for W&B (0-255 uint8)
+                comparison_uint8 = (comparison * 255).astype(np.uint8)
+                
                 images_to_log.append(wandb.Image(
-                    comparison,
+                    comparison_uint8,
                     caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
                 ))
                 
@@ -157,19 +160,56 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
             
             # Log to W&B
             if images_to_log:
+                # Log individual images
                 wandb.log({
                     "samples/generated_images": images_to_log,
-                    "samples/step": global_step
+                    "samples/step": global_step,
+                    "samples/count": len(images_to_log)
                 }, step=global_step)
                 
-                logging.info(f"Generated and logged {len(images_to_log)} samples to W&B")
+                # Also create a combined figure for easier viewing
+                try:
+                    fig, axes = plt.subplots(len(images_to_log), 1, figsize=(15, 5*len(images_to_log)))
+                    if len(images_to_log) == 1:
+                        axes = [axes]
+                    
+                    for idx, img_data in enumerate(images_to_log):
+                        # Get the comparison image (already uint8)
+                        comparison = img_data._image if hasattr(img_data, '_image') else None
+                        if comparison is not None:
+                            axes[idx].imshow(comparison, cmap='gray')
+                            axes[idx].set_title(img_data.caption if hasattr(img_data, 'caption') else f"Sample {idx+1}")
+                            axes[idx].axis('off')
+                    
+                    plt.tight_layout()
+                    
+                    wandb.log({
+                        "samples/combined_figure": wandb.Image(fig)
+                    }, step=global_step)
+                    
+                    plt.close(fig)
+                except Exception as fig_e:
+                    print(f"⚠️ Combined figure creation failed: {fig_e}")
+                
+                print(f"✅ Logged {len(images_to_log)} samples to W&B at step {global_step}")
             else:
                 logging.warning("No valid samples generated for W&B logging")
             
         except Exception as e:
-            logging.warning(f"Failed to generate samples: {str(e)}")
+            logging.error(f"Failed to generate samples: {str(e)}")
             import traceback
-            logging.warning(f"Traceback: {traceback.format_exc()}")
+            logging.error(f"Traceback: {traceback.format_exc()}")
+            # Try a simple test image to see if W&B image logging works
+            try:
+                test_img = np.random.rand(64, 64) * 255
+                test_img = test_img.astype(np.uint8)
+                wandb.log({
+                    "debug/test_image": wandb.Image(test_img, caption="Test image to verify W&B logging"),
+                    "debug/step": global_step
+                }, step=global_step)
+                print("✅ Test image logged to W&B successfully")
+            except Exception as test_e:
+                print(f"❌ Even test image failed: {test_e}")
     
     model.train()
 
@@ -205,6 +245,15 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
     logging.info(f"Timestep sampling method: {args.timestep_method}")
     if use_wandb:
         logging.info(f"W&B sampling every {args.sample_every} steps")
+    
+    # Test W&B logging only
+    if args.test_wandb_only:
+        print("🧪 Testing W&B logging only...")
+        generate_and_log_samples(model, val_loader, betas, t_intervals, device, 1)
+        print("W&B test completed. Exiting...")
+        if use_wandb:
+            wandb.finish()
+        return
     
     # Training loop
     for epoch in range(config.training.epochs):
@@ -252,7 +301,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     continue
                 
                 # Log loss for first few batches
-                if epoch == 0 and batch_idx <= 5:
+                if epoch == 0 and batch_idx <= 3:
                     print(f"Batch {batch_idx}: Loss = {loss.item():.6f}")
                 
                 # Backward pass
@@ -272,16 +321,19 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 total_norm = total_norm ** (1. / 2)
                 
                 # Detailed gradient analysis for first few batches
-                if epoch == 0 and batch_idx <= 5:
+                if epoch == 0 and batch_idx <= 3:
                     print(f"Batch {batch_idx}: Gradient norm = {total_norm:.3f}, Max grad = {max_grad:.6f}")
                     
-                    if total_norm > 10:
+                    if total_norm > 5:
                         print(f"🚨 Large gradients detected in batch {batch_idx}!")
+                        large_grad_params = []
                         for name, param in model.named_parameters():
                             if param.grad is not None:
                                 grad_norm = param.grad.norm().item()
                                 if grad_norm > 1.0:
-                                    print(f"  {name}: {grad_norm:.3f}")
+                                    large_grad_params.append(f"{name}: {grad_norm:.3f}")
+                        if large_grad_params:
+                            print(f"  Top gradient norms: {large_grad_params[:3]}")
                 
                 # Gradient explosion check
                 gradient_threshold = getattr(args, 'gradient_threshold', 50)
@@ -334,13 +386,13 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     
                     # Generate and log samples
                     if global_step % args.sample_every == 0 and global_step > 0:
-                        logging.info(f"Generating samples at step {global_step}")
+                        print(f"🔄 Generating samples at step {global_step}")
                         generate_and_log_samples(
                             model, val_loader, betas, t_intervals, device, global_step
                         )
                 
-                # Periodic logging
-                if global_step % args.log_every_n_steps == 0:
+                # Periodic logging - reduce frequency
+                if global_step % (args.log_every_n_steps * 10) == 0:
                     logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
                                f'Step {global_step} - '
                                f'Loss: {loss.item():.6f}, '
@@ -417,6 +469,7 @@ def parse_args():
     parser.add_argument('--gradient_threshold', type=float, default=50.0, help='Gradient explosion threshold')
     parser.add_argument('--clip_norm', type=float, default=1.0, help='Gradient clipping norm')
     parser.add_argument('--debug_early_stop', type=int, default=None, help='Stop after N batches for debugging')
+    parser.add_argument('--test_wandb_only', action='store_true', help='Test W&B logging with minimal samples then exit')
 
     return parser.parse_args()
 
