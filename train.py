@@ -99,19 +99,10 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 # Take middle slice for visualization
                 middle_slice = inputs.size(-1) // 2
                 
-                # Find available channels
-                available_channels = []
-                for j in range(4):
-                    if j != target_idx and torch.sum(inputs[0, j] > 0) > 100:
-                        available_channels.append(j)
-                
-                if not available_channels:
-                    available_channels = [j for j in range(4) if j != target_idx]
-                
-                # Extract images
-                input_img = inputs[0, available_channels[0], :, :, middle_slice].cpu().numpy()
-                target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
-                gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
+                # Extract all modality images and target
+                modality_names = ['t1n', 't1c', 't2w', 't2f']
+                all_images = []
+                caption_parts = []
                 
                 # Normalize for display
                 def safe_normalize(img):
@@ -122,23 +113,41 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     else:
                         return np.zeros_like(img)
                 
-                input_img_norm = safe_normalize(input_img)
-                target_img_norm = safe_normalize(target_img)
-                gen_img_norm = safe_normalize(gen_img)
+                # Add all 4 input modalities
+                for j in range(4):
+                    input_img = inputs[0, j, :, :, middle_slice].cpu().numpy()
+                    input_img_norm = safe_normalize(input_img)
+                    all_images.append(input_img_norm)
+                    
+                    if j == target_idx:
+                        caption_parts.append(f"{modality_names[j]} (noise)")
+                    else:
+                        caption_parts.append(modality_names[j])
                 
-                # Create side-by-side comparison
-                comparison = np.concatenate([input_img_norm, target_img_norm, gen_img_norm], axis=1)
+                # Add ground truth target
+                target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
+                target_img_norm = safe_normalize(target_img)
+                all_images.append(target_img_norm)
+                target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
+                caption_parts.append(f"{target_mod} GT")
+                
+                # Add generated target
+                gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
+                gen_img_norm = safe_normalize(gen_img)
+                all_images.append(gen_img_norm)
+                caption_parts.append(f"{target_mod} Gen")
+                
+                # Create side-by-side comparison (6 images total)
+                comparison = np.concatenate(all_images, axis=1)
                 comparison_uint8 = (comparison * 255).astype(np.uint8)
                 
                 # Create caption
-                modality_names = ['t1n', 't1c', 't2w', 't2f']
-                available_mod = modality_names[available_channels[0]]
-                target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
+                caption = f"Sample {i+1}: " + " | ".join(caption_parts)
                 
                 # Create W&B image
                 wandb_img = wandb.Image(
                     comparison_uint8,
-                    caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
+                    caption=caption
                 )
                 images_to_log.append(wandb_img)
                 
