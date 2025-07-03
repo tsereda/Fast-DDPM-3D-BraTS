@@ -327,6 +327,8 @@ def parse_args():
                        help='Input size for full volumes (default: 80 80 80)')
     parser.add_argument('--patch_size', nargs=3, type=int, default=[80, 80, 80],
                        help='Patch size for patch-based training (default: 80 80 80)')
+    parser.add_argument('--crops_per_volume', type=int, default=4,
+                       help='Number of crops per volume for patch-based training (default: 4)')
 
     return parser.parse_args()
 
@@ -355,7 +357,8 @@ def setup_datasets(args, config):
         phase='train',
         crop_size=crop_size,
         use_full_volumes=args.use_full_volumes,
-        input_size=input_size
+        input_size=input_size,
+        crops_per_volume=args.crops_per_volume
     )
     
     val_dataset = BraTS3DUnifiedDataset(
@@ -363,7 +366,8 @@ def setup_datasets(args, config):
         phase='val',
         crop_size=crop_size,
         use_full_volumes=args.use_full_volumes,
-        input_size=input_size
+        input_size=input_size,
+        crops_per_volume=1  # Always use 1 crop per volume for validation
     )
     
     if args.debug:
