@@ -300,6 +300,9 @@ class FastDDPM3D(nn.Module):
         # Output
         self.norm_out = Normalize(block_in)
         self.conv_out = nn.Conv3d(block_in, self.out_channels, kernel_size=3, stride=1, padding=1)
+        
+        # 🔥 CRITICAL: Apply proper weight initialization AFTER building the model
+        self._init_weights()
 
     def forward(self, x, t):
         # x shape: [B, 4, H, W, D] for unified 4->1 input
@@ -346,3 +349,34 @@ class FastDDPM3D(nn.Module):
             h = torch.sigmoid(h)
         
         return h
+    
+    def _init_weights(self):
+        """
+        🔥 CRITICAL FIX: Proper weight initialization for 3D medical imaging
+        This prevents gradient explosion in large 3D models
+        """
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Conv3d):
+                # He initialization for Conv3d with very small gain for stability
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                # Scale down weights significantly for 3D stability
+                module.weight.data *= 0.1
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+                    
+            elif isinstance(module, nn.Linear):
+                # Xavier initialization for Linear layers with small gain
+                nn.init.xavier_normal_(module.weight, gain=0.1)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+                    
+            elif isinstance(module, nn.GroupNorm):
+                # Proper GroupNorm initialization
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+        
+        # Special initialization for output layer - start very small
+        if hasattr(self, 'conv_out'):
+            nn.init.normal_(self.conv_out.weight, mean=0.0, std=0.001)
+            if self.conv_out.bias is not None:
+                nn.init.constant_(self.conv_out.bias, 0)
