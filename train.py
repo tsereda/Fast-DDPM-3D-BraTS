@@ -110,6 +110,72 @@ def debug_loss_components_detailed(model, inputs, targets, t, e, betas, target_i
     return model_input, e_scaled
 
 
+def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4):
+    """Generate samples and log them to W&B"""
+    model.eval()
+    
+    with torch.no_grad():
+        # Get a batch from validation set
+        sample_batch = next(iter(val_loader))
+        inputs = sample_batch['input'][:num_samples].to(device)
+        targets = sample_batch['target'][:num_samples].unsqueeze(1).to(device)
+        target_idx = sample_batch['target_idx'][0].item()
+        
+        # Generate samples using the reverse process
+        try:
+            # Use your unified_4to1_generalized_steps_3d function
+            generated = unified_4to1_generalized_steps_3d(
+                inputs, model, betas, t_intervals, target_idx
+            )
+            
+            # Create comparison images (take middle slice for visualization)
+            middle_slice = inputs.size(-1) // 2
+            
+            # Prepare images for logging
+            images_to_log = []
+            
+            for i in range(min(num_samples, 4)):  # Log up to 4 samples
+                # Original input (take first channel)
+                input_img = inputs[i, 0, :, :, middle_slice].cpu().numpy()
+                
+                # Ground truth target
+                target_img = targets[i, 0, :, :, middle_slice].cpu().numpy()
+                
+                # Generated sample
+                if generated is not None:
+                    gen_img = generated[i, 0, :, :, middle_slice].cpu().numpy()
+                else:
+                    gen_img = np.zeros_like(target_img)
+                
+                # Normalize for display
+                input_img = (input_img - input_img.min()) / (input_img.max() - input_img.min() + 1e-8)
+                target_img = (target_img - target_img.min()) / (target_img.max() - target_img.min() + 1e-8)
+                gen_img = (gen_img - gen_img.min()) / (gen_img.max() - gen_img.min() + 1e-8)
+                
+                # Create side-by-side comparison
+                comparison = np.concatenate([input_img, target_img, gen_img], axis=1)
+                
+                images_to_log.append(wandb.Image(
+                    comparison,
+                    caption=f"Sample {i+1}: Input | Target | Generated (Target: {sample_batch['target_modality'][i]})"
+                ))
+            
+            # Log to W&B
+            wandb.log({
+                "samples/generated_images": images_to_log,
+                "samples/step": global_step
+            }, step=global_step)
+            
+            logging.info(f"Generated and logged {len(images_to_log)} samples to W&B")
+            
+        except Exception as e:
+            logging.warning(f"Failed to generate samples: {str(e)}")
+            import traceback
+            logging.warning(f"Traceback: {traceback.format_exc()}")
+    
+    model.train()
+
+
 def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, scaler, 
                        betas, t_intervals, config, args, device):
     """🔥 DEBUG: Enhanced training loop with debugging steps"""
@@ -300,6 +366,13 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                         'train/timesteps_mean': t.float().mean().item(),
                         'train/timesteps_max': t.max().item(),
                     }, step=global_step)
+                    
+                    # Generate and log samples
+                    if global_step % args.sample_every == 0 and global_step > 0:
+                        logging.info(f"Generating samples at step {global_step}")
+                        generate_and_log_samples(
+                            model, val_loader, betas, t_intervals, device, global_step
+                        )
                 
                 # Periodic logging
                 if global_step % args.log_every_n_steps == 0:
@@ -340,6 +413,10 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 }, step=global_step)
         else:
             logging.warning(f'Epoch {epoch+1} - No valid batches processed!')
+        
+        # Generate and log samples periodically
+        if use_wandb and global_step % args.sample_every == 0:
+            generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4)
         
         # Early exit for debugging
         if args.debug_early_stop:
