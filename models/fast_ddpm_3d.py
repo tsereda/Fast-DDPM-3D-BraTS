@@ -256,6 +256,7 @@ class FastDDPM3D(nn.Module):
             temb_channels=self.temb_ch,
             dropout=dropout
         )
+        self.mid.attn_1 = AttnBlock3D(block_in)
         self.mid.block_2 = ResnetBlock3D(
             in_channels=block_in,
             out_channels=block_in,
@@ -323,6 +324,7 @@ class FastDDPM3D(nn.Module):
         # Middle
         h = hs[-1]
         h = self.mid.block_1(h, temb)
+        h = self.mid.attn_1(h)
         h = self.mid.block_2(h, temb)
 
         # Upsampling
