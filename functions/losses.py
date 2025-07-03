@@ -7,7 +7,7 @@ np.bool = np.bool_
 
 
 def compute_3d_gradient(tensor):
-    """Compute 3D gradients for edge preservation using proper 3D Sobel kernels"""
+    """Compute 3D gradients for edge preservation using proper 3D Sobel kernels and robust epsilon for stability"""
     B, C, D, H, W = tensor.shape
 
     # Define 3D Sobel kernels for x, y, z
@@ -56,11 +56,12 @@ def compute_3d_gradient(tensor):
     grad_y = F.conv3d(tensor, kernel_y, padding=1, groups=C)
     grad_z = F.conv3d(tensor, kernel_z, padding=1, groups=C)
 
-    return torch.sqrt(grad_x ** 2 + grad_y ** 2 + grad_z ** 2 + 1e-8)
+    # Use robust epsilon for sqrt
+    return torch.sqrt(grad_x ** 2 + grad_y ** 2 + grad_z ** 2 + 1e-6)
 
 
 def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
-    """Simplified 3D SSIM for structural similarity"""
+    """Simplified 3D SSIM for structural similarity with robust denominator clamping"""
     # Create 3D Gaussian window
     coords = torch.arange(window_size, dtype=torch.float32, device=x.device)
     coords -= window_size // 2
@@ -89,7 +90,9 @@ def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
     c1 = 0.01**2
     c2 = 0.03**2
     
-    ssim_map = ((2*mu_xy + c1) * (2*sigma_xy + c2)) / ((mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2))
+    denom = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
+    denom = denom.clamp(min=1e-6)
+    ssim_map = ((2*mu_xy + c1) * (2*sigma_xy + c2)) / denom
     
     return ssim_map.mean()
 
