@@ -175,9 +175,9 @@ class BraTS3DUnifiedDataset(Dataset):
     def __getitem__(self, idx):
         case_dir, crop_idx = self.samples[idx]
         
-        # Load all modalities
+        # 🔥 FIXED: Always load ALL 4 modalities for consistent input
         modality_volumes = {}
-        available_modalities = []
+        successful_modalities = []
         volume_shape = None
         
         for modality in self.modalities:
@@ -187,16 +187,23 @@ class BraTS3DUnifiedDataset(Dataset):
                 volume, affine = self._load_full_volume(modality_file)
                 if volume is not None:
                     modality_volumes[modality] = volume
-                    available_modalities.append(modality)
+                    successful_modalities.append(modality)
                     if volume_shape is None:
                         volume_shape = volume.shape
         
-        if len(available_modalities) < self.min_input_modalities:
+        # Ensure we have enough modalities to proceed
+        if len(successful_modalities) < self.min_input_modalities:
             # Fallback to zero volumes
             volume_shape = (240, 240, 155)  # Standard BraTS size
-            for modality in self.modalities:
-                if modality not in modality_volumes:
-                    modality_volumes[modality] = np.zeros(volume_shape, dtype=np.float32)
+        
+        # 🔥 CRITICAL FIX: Always ensure ALL 4 modalities are present
+        # Fill missing modalities with zeros to maintain consistent 4-channel input
+        for modality in self.modalities:
+            if modality not in modality_volumes:
+                if volume_shape is None:
+                    volume_shape = (240, 240, 155)  # Standard BraTS size
+                modality_volumes[modality] = np.zeros(volume_shape, dtype=np.float32)
+                logger.warning(f"Missing {modality} for {case_dir.name}, using zero volume")
         
         # Generate consistent random crop coordinates for all modalities
         # Use crop_idx as seed for reproducible crops per case
@@ -216,24 +223,28 @@ class BraTS3DUnifiedDataset(Dataset):
             
             cropped_volumes[modality] = torch.FloatTensor(normalized)
         
-        # Select target modality for synthesis
-        if self.phase == 'train' and len(available_modalities) > 0:
-            target_modality = random.choice(available_modalities)
-        elif len(available_modalities) > 0:
-            target_modality = available_modalities[0]
+        # Select target modality for synthesis from successfully loaded modalities
+        if self.phase == 'train' and len(successful_modalities) > 0:
+            target_modality = random.choice(successful_modalities)
+        elif len(successful_modalities) > 0:
+            target_modality = successful_modalities[0]
         else:
-            target_modality = self.modalities[0]
+            target_modality = self.modalities[0]  # Fallback to first modality
         
         target_idx = self.modalities.index(target_modality)
         target_volume = cropped_volumes[target_modality]
         
-        # 🔥 FIX: Update available_modalities to exclude the target modality
-        # The model should only see the 3 available input modalities, not the target
-        input_available_modalities = [mod for mod in available_modalities if mod != target_modality]
+        # 🔥 FIXED: Available modalities are all successfully loaded modalities except target
+        input_available_modalities = [mod for mod in successful_modalities if mod != target_modality]
         
-        # Create input with target modality masked (set to zero)
+        # 🔥 CRITICAL FIX: Create input with target modality replaced by Gaussian noise
         input_modalities = torch.stack([cropped_volumes[mod] for mod in self.modalities])
-        input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
+        
+        # Replace target modality with Gaussian noise instead of zeros
+        # Use same spatial dimensions but with noise sampled from N(0.5, 0.1) for [0,1] range
+        noise = torch.normal(mean=0.5, std=0.1, size=input_modalities[target_idx].shape)
+        noise = torch.clamp(noise, 0.0, 1.0)  # Ensure noise stays in [0,1] range
+        input_modalities[target_idx] = noise
         
         # Validation
         assert input_modalities.shape == (4, *self.crop_size)
@@ -242,11 +253,11 @@ class BraTS3DUnifiedDataset(Dataset):
         assert torch.all(target_volume >= 0) and torch.all(target_volume <= 1)
         
         return {
-            'input': input_modalities,      # [4, H, W, D] with target masked, range [0,1]
+            'input': input_modalities,      # [4, H, W, D] with target as Gaussian noise, range [0,1]
             'target': target_volume,        # [H, W, D] target modality, range [0,1]
             'target_idx': target_idx,
             'case_name': case_dir.name,
             'target_modality': target_modality,
-            'available_modalities': input_available_modalities,  # 🔥 FIX: Only the 3 input modalities
+            'available_modalities': input_available_modalities,  # 🔥 FIXED: Only the 3 non-target modalities
             'crop_coords': crop_coords
         }
