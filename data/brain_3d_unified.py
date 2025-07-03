@@ -71,19 +71,33 @@ class BraTS3DUnifiedDataset(Dataset):
         return sorted(cases, key=lambda x: x.name)
     
     def _find_modality_file(self, case_dir, modality):
-        """Find modality file using common BraTS patterns"""
+        """Find modality file using specific BraTS patterns"""
+        # 🔥 FIXED: Use more specific patterns to avoid mismatches
         patterns = [
-            f'*{modality}*.nii*',
-            f'*{modality.upper()}*.nii*',
-            f'*-{modality}.nii*',
-            f'*_{modality}.nii*'
+            f'*-{modality}.nii*',        # Exact match: BraTS-GLI-xxxxx-t1n.nii.gz
+            f'*_{modality}.nii*',        # Underscore: case_t1n.nii.gz
+            f'*{modality.upper()}.nii*', # Uppercase exact: caset1N.nii.gz
+            f'*{modality}.nii*'          # Last resort: exact modality name
         ]
         
         for pattern in patterns:
             files = list(case_dir.glob(pattern))
             if files:
-                files.sort(key=lambda x: (x.suffix != '.gz', x.name))
-                return files[0]
+                # Filter to ensure the modality name appears exactly at word boundaries
+                exact_files = []
+                for f in files:
+                    # Check if modality appears as complete word in filename
+                    fname = f.stem.lower()  # Remove .nii.gz and convert to lowercase
+                    if (f'-{modality}.' in f.name.lower() or 
+                        f'_{modality}.' in f.name.lower() or
+                        f'{modality}.' in f.name.lower() or
+                        fname.endswith(f'-{modality}') or
+                        fname.endswith(f'_{modality}')):
+                        exact_files.append(f)
+                
+                if exact_files:
+                    exact_files.sort(key=lambda x: (x.suffix != '.gz', x.name))
+                    return exact_files[0]
         return None
     
     def _load_full_volume(self, filepath):
