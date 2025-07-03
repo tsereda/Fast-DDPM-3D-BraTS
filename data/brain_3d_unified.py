@@ -267,8 +267,9 @@ class BraTS3DUnifiedDataset(Dataset):
         target_idx = self.modalities.index(target_modality)
         target_volume = cropped_volumes[target_modality]
         
-        # 🔥 FIXED: Available modalities are all successfully loaded modalities except target
-        input_available_modalities = [mod for mod in successful_modalities if mod != target_modality]
+        # 🔥 FIXED: Available modalities are the 3 non-target modalities that were successfully loaded
+        # This should typically be 3 modalities (all except target), but could be fewer if data is incomplete
+        available_non_target_modalities = [mod for mod in successful_modalities if mod != target_modality]
         
         # 🔥 CRITICAL FIX: Create input with target modality replaced by ZEROS (not noise)
         input_modalities = torch.stack([cropped_volumes[mod] for mod in self.modalities])
@@ -276,6 +277,12 @@ class BraTS3DUnifiedDataset(Dataset):
         # Replace target modality with ZEROS instead of Gaussian noise
         # Gaussian noise was causing worse gradient explosion (40k+ vs 10k)
         input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
+        
+        # For display purposes, show which 3 modalities are actually available (non-zero)
+        # Plus indicate if target is replaced with zeros
+        display_available_modalities = available_non_target_modalities.copy()
+        if target_modality in successful_modalities:
+            display_available_modalities.append(f"{target_modality}_as_zeros")
         
         # Validation
         assert input_modalities.shape == (4, *self.crop_size)
@@ -289,6 +296,6 @@ class BraTS3DUnifiedDataset(Dataset):
             'target_idx': target_idx,
             'case_name': case_dir.name,
             'target_modality': target_modality,
-            'available_modalities': input_available_modalities,  # 🔥 FIXED: Only the 3 non-target modalities
+            'available_modalities': display_available_modalities,  # 🔥 FIXED: Shows 3 non-target + target_as_zeros
             'crop_coords': crop_coords
         }
