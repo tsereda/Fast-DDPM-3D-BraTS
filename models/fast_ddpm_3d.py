@@ -20,8 +20,8 @@ def get_timestep_embedding(timesteps, embedding_dim):
 
 
 def nonlinearity(x):
-    # swish activation
-    return x * torch.sigmoid(x)
+    # 🔥 FIXED: Use ReLU instead of Swish to prevent gradient explosion
+    return F.relu(x)
 
 
 def Normalize(in_channels, num_groups=32):
@@ -339,15 +339,12 @@ class FastDDPM3D(nn.Module):
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
-        # Output with professor's recommended sigmoid activation
+        # Output - 🔥 CRITICAL FIX: NO sigmoid for diffusion models
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
         
-        # 🔥 CRITICAL FIX: Add sigmoid activation for [0,1] output
-        if getattr(self.config.model, 'use_sigmoid', True):
-            h = torch.sigmoid(h)
-        
+        # 🔥 REMOVED sigmoid activation - diffusion models predict noise, not images
         return h
     
     def _init_weights(self):

@@ -13,16 +13,16 @@ model:
     type: "unified_4to1"     # 4 input modalities → 1 target modality
     in_channels: 4           # Input: all 4 BraTS modalities
     out_ch: 1               # Output: single target modality
-    ch: 64                  # Base channels (reduced for 3D memory)
-    ch_mult: [1, 2, 4]      # Channel multipliers (3 levels for 3D)
-    num_res_blocks: 2       # ResNet blocks per level
-    attn_resolutions: [16]  # Attention at 16x16x16 resolution
+    ch: 32                  # 🔥 FIXED: Reduced from 64 to 32 for stability (~15M parameters)
+    ch_mult: [1, 2]         # 🔥 FIXED: Reduced from [1, 2, 4] to [1, 2] 
+    num_res_blocks: 1       # 🔥 FIXED: Reduced from 2 to 1 block per level
+    attn_resolutions: []    # 🔥 FIXED: Removed attention for stability
     dropout: 0.1
     var_type: fixedsmall    # Fixed variance (not learned)
     ema_rate: 0.9999        # Exponential moving average
     ema: True
     resamp_with_conv: True  # Use conv for up/downsampling
-    use_sigmoid: True       # Professor: Sigmoid activation for [0,1] output
+    use_sigmoid: False      # 🔥 FIXED: No sigmoid for diffusion models
 
 diffusion:
     beta_schedule: linear
