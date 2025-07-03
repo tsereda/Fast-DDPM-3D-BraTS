@@ -274,6 +274,7 @@ class BraTS3DUnifiedDataset(Dataset):
             logger.info(f"🔍 DEBUG [{idx}]: successfully_loaded_modalities={successfully_loaded_modalities}")
             logger.info(f"🔍 DEBUG [{idx}]: available_non_target_modalities={available_non_target_modalities}")
             logger.info(f"🔍 DEBUG [{idx}]: display_available_modalities={display_available_modalities}")
+            logger.info(f"🔍 DEBUG [{idx}]: ABOUT TO RETURN - display_available_modalities={display_available_modalities}")
             
             # Additional debug: check what's actually in the input tensor
             for i, mod in enumerate(self.modalities):

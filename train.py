@@ -231,6 +231,12 @@ def debug_dataset_consistency(batch, batch_idx):
     
     inputs = batch['input']
     target_idx = batch['target_idx'][0].item()
+    
+    # DEBUG: Let's see the raw batch data structure
+    print(f"🔍 DEBUG RAW: available_modalities type: {type(batch.get('available_modalities', 'MISSING'))}")
+    print(f"🔍 DEBUG RAW: available_modalities content: {batch.get('available_modalities', 'MISSING')}")
+    
+    # FIXED: Correctly access the available_modalities for first sample in batch
     available_modalities = batch.get('available_modalities', [['unknown']])[0]
     target_modality = batch.get('target_modality', ['unknown'])[0]
     
