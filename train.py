@@ -104,12 +104,15 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     else:
                         return np.zeros_like(img)
                 
-                # Add all 4 input modalities
+                # Replace the target channel in inputs with the noise used for generation for visualization
+                inputs_with_noise = inputs.clone()
+                inputs_with_noise[0, target_idx] = x_target_noise[0, 0]
+
+                # Add all 4 input modalities (use inputs_with_noise for visualization)
                 for j in range(4):
-                    input_img = inputs[0, j, :, :, middle_slice].cpu().numpy()
+                    input_img = inputs_with_noise[0, j, :, :, middle_slice].cpu().numpy()
                     input_img_norm = safe_normalize(input_img)
                     all_images.append(input_img_norm)
-                    
                     if j == target_idx:
                         caption_parts.append(f"{modality_names[j]} (noise)")
                     else:
