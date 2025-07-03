@@ -36,19 +36,10 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
-def sample_timesteps(t_intervals, batch_size, method="antithetic"):
-    """Sample timesteps for training"""
-    if method == "antithetic":
-        n = batch_size
-        idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
-        idx_2 = len(t_intervals) - idx_1 - 1
-        idx = torch.cat([idx_1, idx_2], dim=0)[:n]
-        t = t_intervals[idx]
-    elif method == "simple":
-        idx = torch.randint(0, len(t_intervals), size=(batch_size,))
-        t = t_intervals[idx]
-    
-    return t
+def sample_timesteps(t_intervals, batch_size):
+    """Simple timestep sampling"""
+    idx = torch.randint(0, len(t_intervals), size=(batch_size,))
+    return t_intervals[idx]
 
 
 
@@ -168,9 +159,9 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
     model.train()
 
 
-def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, scaler, 
-                       betas, t_intervals, config, args, device):
-    """Training loop"""
+def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler, 
+                 betas, t_intervals, config, args, device):
+    """Simplified training loop"""
     
     # Setup W&B if requested
     use_wandb = False
@@ -188,7 +179,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
     
     # Training parameters
     global_step = 0
-    best_val_loss = float('inf')
     log_dir = os.path.join(args.exp, 'logs', args.doc)
     os.makedirs(log_dir, exist_ok=True)
     
@@ -196,15 +186,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
     logging.info(f"Batch size: {config.training.batch_size}")
     logging.info(f"Log every: {config.training.log_every_n_steps} steps")
     logging.info(f"Mixed precision: {not args.no_mixed_precision}")
-    
-    # Test W&B logging only
-    if args.test_wandb_only:
-        print("Testing W&B logging only...")
-        generate_and_log_samples(model, val_loader, betas, t_intervals, device, 1)
-        print("W&B test completed. Exiting...")
-        if use_wandb:
-            wandb.finish()
-        return
     
     # Training loop
     for epoch in range(config.training.epochs):
@@ -225,65 +206,34 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 
                 # Input validation
                 if torch.isnan(inputs).any() or torch.isnan(targets).any():
-                    logging.warning(f"Skipping batch {batch_idx} due to NaN values")
-                    continue
+                    raise ValueError(f"NaN detected in batch {batch_idx}")
                 
                 if torch.isinf(inputs).any() or torch.isinf(targets).any():
-                    logging.warning(f"Skipping batch {batch_idx} due to Inf values")
-                    continue
+                    raise ValueError(f"Inf detected in batch {batch_idx}")
                 
                 n = inputs.size(0)
                 
                 # Timestep sampling
-                t = sample_timesteps(t_intervals, n, method=args.timestep_method).to(device)
-                
+                t = sample_timesteps(t_intervals, n).to(device)
                 e = torch.randn_like(targets)
                 
-                # Compute loss
-                if args.no_mixed_precision:
+                # Compute loss with mixed precision
+                with autocast(enabled=not args.no_mixed_precision):
                     loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
-                else:
-                    with autocast():
-                        loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                 
                 # Loss validation
                 if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
-                    logging.warning(f"Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
-                    continue
+                    raise ValueError(f"Invalid loss: {loss.item()}")
                 
                 # Backward pass
                 if args.no_mixed_precision:
                     loss.backward()
-                else:
-                    scaler.scale(loss).backward()
-                
-                # Check gradients
-                total_norm = 0
-                max_grad = 0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                        max_grad = max(max_grad, p.grad.abs().max().item())
-                total_norm = total_norm ** (1. / 2)
-                
-                # Gradient explosion check
-                if total_norm > args.gradient_threshold:
-                    logging.warning(f"Large gradient norm detected: {total_norm:.3f}, skipping batch")
-                    optimizer.zero_grad()
-                    continue
-                
-                # Gradient clipping
-                if args.no_mixed_precision:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
-                else:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
-                
-                # Optimizer step
-                if args.no_mixed_precision:
                     optimizer.step()
                 else:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
                     scaler.step(optimizer)
                     scaler.update()
                 
@@ -304,14 +254,11 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     wandb.log({
                         'train/loss': loss.item(),
                         'train/learning_rate': optimizer.param_groups[0]["lr"],
-                        'train/epoch': epoch,
                         'train/step': global_step,
                         'train/target_idx': target_idx,
-                        'train/grad_norm': total_norm,
-                        'train/max_grad': max_grad,
                     }, step=global_step)
                     
-                    # Generate and log samples
+                    # Generate and log samples for debugging
                     if global_step % args.sample_every == 0 and global_step > 0:
                         generate_and_log_samples(
                             model, val_loader, betas, t_intervals, device, global_step
@@ -320,19 +267,11 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 # Periodic logging
                 if global_step % config.training.log_every_n_steps == 0:
                     logging.info(f'Epoch {epoch+1}, Step {global_step} - Loss: {loss.item():.6f}, '
-                               f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
-                               f'Batch size: {config.training.batch_size}, '
-                               f'Target: {target_idx}')
-                
-                # Early stopping for debugging
-                if args.debug_early_stop and batch_idx >= args.debug_early_stop:
-                    logging.info(f"Early stopping for debugging after {batch_idx+1} batches")
-                    break
+                               f'LR: {optimizer.param_groups[0]["lr"]:.2e}, Target: {target_idx}')
                     
             except Exception as e:
-                logging.warning(f"Training batch {batch_idx} failed: {str(e)}")
-                optimizer.zero_grad()
-                continue
+                logging.error(f"Training batch {batch_idx} failed: {str(e)}")
+                raise  # Fail fast instead of continuing
         
         # End of epoch
         scheduler.step()
@@ -350,11 +289,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 }, step=global_step)
         else:
             logging.warning(f'Epoch {epoch+1} - No valid batches processed!')
-        
-        # Early exit for debugging
-        if args.debug_early_stop:
-            logging.info("Early exit for debugging after 1 epoch")
-            break
     
     logging.info("Training completed!")
     
@@ -384,12 +318,7 @@ def parse_args():
     
     # Training options
     parser.add_argument('--no_mixed_precision', action='store_true', help='Disable mixed precision training')
-    parser.add_argument('--timestep_method', type=str, default='antithetic', choices=['antithetic', 'simple'], 
-                       help='Timestep sampling method')
-    parser.add_argument('--gradient_threshold', type=float, default=50.0, help='Gradient explosion threshold')
     parser.add_argument('--clip_norm', type=float, default=1.0, help='Gradient clipping norm')
-    parser.add_argument('--debug_early_stop', type=int, default=None, help='Stop after N batches for debugging')
-    parser.add_argument('--test_wandb_only', action='store_true', help='Test W&B logging with minimal samples then exit')
 
     return parser.parse_args()
 
@@ -586,7 +515,7 @@ def main():
     betas, t_intervals, scaler = setup_diffusion_and_scaler(config, device, args)
     
     # Run training loop
-    training_loop_debug(
+    training_loop(
         model, train_loader, val_loader, optimizer, scheduler, scaler,
         betas, t_intervals, config, args, device
     )
