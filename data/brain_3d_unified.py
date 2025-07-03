@@ -194,15 +194,17 @@ class BraTS3DUnifiedDataset(Dataset):
         successful_modalities = []
         volume_shape = None
         
-        # Debug logging for this specific case
-        if "BraTS-GLI-00811-000" in case_dir.name:
-            logger.info(f"🔍 DEBUG: Loading modalities for {case_dir.name}")
+        # 🔥 DEBUG: Enable debug logging for first few samples to diagnose the issue
+        debug_this_sample = idx < 10  # Debug first 10 samples
+        
+        if debug_this_sample:
+            logger.info(f"🔍 DEBUG [{idx}]: Loading modalities for {case_dir.name}")
         
         for modality in self.modalities:
             modality_file = self._find_modality_file(case_dir, modality)
             
-            if "BraTS-GLI-00811-000" in case_dir.name:
-                logger.info(f"🔍 DEBUG: {modality} -> {modality_file}")
+            if debug_this_sample:
+                logger.info(f"🔍 DEBUG [{idx}]: {modality} -> {modality_file}")
             
             if modality_file:
                 volume, affine = self._load_full_volume(modality_file)
@@ -212,17 +214,17 @@ class BraTS3DUnifiedDataset(Dataset):
                     if volume_shape is None:
                         volume_shape = volume.shape
                     
-                    if "BraTS-GLI-00811-000" in case_dir.name:
-                        logger.info(f"🔍 DEBUG: {modality} loaded successfully, shape: {volume.shape}")
+                    if debug_this_sample:
+                        logger.info(f"🔍 DEBUG [{idx}]: {modality} loaded successfully, shape: {volume.shape}")
                 else:
-                    if "BraTS-GLI-00811-000" in case_dir.name:
-                        logger.warning(f"🔍 DEBUG: {modality} failed to load (returned None)")
+                    if debug_this_sample:
+                        logger.warning(f"🔍 DEBUG [{idx}]: {modality} failed to load (returned None)")
             else:
-                if "BraTS-GLI-00811-000" in case_dir.name:
-                    logger.warning(f"🔍 DEBUG: {modality} file not found")
+                if debug_this_sample:
+                    logger.warning(f"🔍 DEBUG [{idx}]: {modality} file not found")
         
-        if "BraTS-GLI-00811-000" in case_dir.name:
-            logger.info(f"🔍 DEBUG: Final successful_modalities: {successful_modalities}")
+        if debug_this_sample:
+            logger.info(f"🔍 DEBUG [{idx}]: Final successful_modalities: {successful_modalities}")
         
         # Ensure we have enough modalities to proceed
         if len(successful_modalities) < self.min_input_modalities:
@@ -236,7 +238,8 @@ class BraTS3DUnifiedDataset(Dataset):
                 if volume_shape is None:
                     volume_shape = (240, 240, 155)  # Standard BraTS size
                 modality_volumes[modality] = np.zeros(volume_shape, dtype=np.float32)
-                logger.warning(f"Missing {modality} for {case_dir.name}, using zero volume")
+                if debug_this_sample:
+                    logger.warning(f"🔍 DEBUG [{idx}]: Missing {modality} for {case_dir.name}, using zero volume")
         
         # Generate consistent random crop coordinates for all modalities
         # Use crop_idx as seed for reproducible crops per case
@@ -283,6 +286,11 @@ class BraTS3DUnifiedDataset(Dataset):
         display_available_modalities = available_non_target_modalities.copy()
         if target_modality in successful_modalities:
             display_available_modalities.append(f"{target_modality}_as_zeros")
+        
+        if debug_this_sample:
+            logger.info(f"🔍 DEBUG [{idx}]: target_modality={target_modality}, target_idx={target_idx}")
+            logger.info(f"🔍 DEBUG [{idx}]: available_non_target_modalities={available_non_target_modalities}")
+            logger.info(f"🔍 DEBUG [{idx}]: display_available_modalities={display_available_modalities}")
         
         # Validation
         assert input_modalities.shape == (4, *self.crop_size)
