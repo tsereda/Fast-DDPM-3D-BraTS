@@ -236,7 +236,7 @@ def debug_dataset_consistency(batch, batch_idx):
     print(f"🔍 DEBUG RAW: available_modalities type: {type(batch.get('available_modalities', 'MISSING'))}")
     print(f"🔍 DEBUG RAW: available_modalities content: {batch.get('available_modalities', 'MISSING')}")
     
-    # FIXED: Correctly access the available_modalities for first sample in batch
+    # FIXED: With custom collate function, available_modalities is now a list of lists correctly
     available_modalities = batch.get('available_modalities', [['unknown']])[0]
     target_modality = batch.get('target_modality', ['unknown'])[0]
     
@@ -581,6 +581,32 @@ def setup_datasets(args, config):
     return train_dataset, val_dataset
 
 
+def custom_collate_fn(batch):
+    """Custom collate function to handle string lists correctly"""
+    # Default collate for most fields
+    collated = {}
+    
+    # Handle each key separately
+    for key in batch[0].keys():
+        if key in ['available_modalities', 'successfully_loaded_modalities']:
+            # Keep list fields as lists of lists
+            collated[key] = [item[key] for item in batch]
+        elif key in ['case_name', 'target_modality']:
+            # String fields - keep as list of strings
+            collated[key] = [item[key] for item in batch]
+        elif key in ['target_idx']:
+            # Integer fields - convert to tensor
+            collated[key] = torch.tensor([item[key] for item in batch])
+        elif key == 'crop_coords':
+            # Keep as list of tuples
+            collated[key] = [item[key] for item in batch]
+        else:
+            # Tensor fields - use default stacking
+            collated[key] = torch.stack([item[key] for item in batch])
+    
+    return collated
+
+
 def setup_dataloaders(train_dataset, val_dataset, config):
     """Setup data loaders"""
     train_loader = DataLoader(
@@ -589,7 +615,8 @@ def setup_dataloaders(train_dataset, val_dataset, config):
         shuffle=True,
         num_workers=getattr(config.data, 'num_workers', 2),
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        collate_fn=custom_collate_fn
     )
     
     val_loader = DataLoader(
@@ -597,7 +624,8 @@ def setup_dataloaders(train_dataset, val_dataset, config):
         batch_size=1,  # Keep batch size 1 for validation
         shuffle=False,
         num_workers=1,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=custom_collate_fn
     )
 
     logging.info(f"Train samples: {len(train_dataset)}")
