@@ -43,7 +43,7 @@ def sample_timesteps(t_intervals, batch_size):
 
 
 
-def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4):
+def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=6):
     """Generate and log samples to W&B"""
     model.eval()
     
@@ -264,7 +264,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     # Generate and log samples for debugging
                     if global_step % args.sample_every == 0 and global_step > 0:
                         generate_and_log_samples(
-                            model, val_loader, betas, t_intervals, device, global_step
+                            model, val_loader, betas, t_intervals, device, global_step, num_samples=6
                         )
                 
                 # Periodic logging
