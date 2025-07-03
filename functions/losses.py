@@ -160,7 +160,7 @@ def brats_4to1_enhanced_loss(model,
                            loss_weights: dict = None,
                            keepdim=False):
     """
-    Enhanced BraTS 4→1 loss with perceptual components
+    Enhanced BraTS 4→1 loss with perceptual components and best-practice NaN/Inf checks and normalization.
     
     Args:
         model: The diffusion model
@@ -186,62 +186,56 @@ def brats_4to1_enhanced_loss(model,
             'ssim': 0.1,       # Structural similarity
             'perceptual': 0.05 # Feature matching (small weight)
         }
-    
+
+    # --- Normalize input tensors to [0, 1] if not already ---
+    def normalize_tensor(x):
+        # Per-sample, per-channel normalization
+        x_min = x.amin(dim=(2,3,4), keepdim=True)
+        x_max = x.amax(dim=(2,3,4), keepdim=True)
+        return (x - x_min) / (x_max - x_min + 1e-6)
+
+    x_available = normalize_tensor(x_available)
+    x_target = normalize_tensor(x_target)
+
     # Standard diffusion forward process
     a = (1-b).cumprod(dim=0)
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
-    
-    # Add noise to target
     x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
-    
-    # Prepare model input
     model_input = x_available.clone()
     model_input[:, target_idx:target_idx+1] = x_noisy
-    
-    # Model prediction
     predicted_noise = model(model_input, t.float())
-    
+
     # === LOSS COMPONENTS ===
-    
-    # 1. Main MSE loss (noise prediction)
     mse_loss = (e - predicted_noise).square().mean(dim=(1, 2, 3, 4) if keepdim else None)
-    
-    # 2. Gradient loss for edge preservation
-    # Predict the clean image to compute perceptual losses
     x_pred = (x_noisy - predicted_noise * (1.0 - a).sqrt()) / a.sqrt()
-    
     grad_target = compute_3d_gradient(x_target)
     grad_pred = compute_3d_gradient(x_pred)
     gradient_loss = F.mse_loss(grad_pred, grad_target, reduction='none')
     gradient_loss = gradient_loss.mean(dim=(1, 2, 3, 4) if keepdim else None)
-    
-    # 3. SSIM loss for structural similarity
     ssim_value = compute_3d_ssim(x_pred, x_target)
     ssim_loss = 1 - ssim_value
-    
-    # 4. Perceptual loss (if network provided)
     perceptual_loss = 0
     if perceptual_net is not None:
         with torch.no_grad():
-            # Don't update perceptual net weights
             target_features = perceptual_net(x_target)
-        
         pred_features = perceptual_net(x_pred)
-        
-        # Multi-scale feature matching
         perceptual_loss = 0
         for pred_feat, target_feat in zip(pred_features, target_features):
             perceptual_loss += F.mse_loss(pred_feat, target_feat.detach())
-        
         perceptual_loss = perceptual_loss / len(pred_features)
-    
-    # === COMBINE LOSSES ===
+
     total_loss = (loss_weights['mse'] * mse_loss + 
                   loss_weights['gradient'] * gradient_loss + 
                   loss_weights['ssim'] * ssim_loss + 
                   loss_weights['perceptual'] * perceptual_loss)
-    
-    # Return detailed loss info for monitoring
+
+    # --- Best-practice: check for NaN/Inf in loss components ---
+    for name, val in zip(['mse_loss','gradient_loss','ssim_loss','perceptual_loss','total_loss'],
+                         [mse_loss, gradient_loss, ssim_loss, perceptual_loss, total_loss]):
+        if torch.isnan(torch.as_tensor(val)).any() or torch.isinf(torch.as_tensor(val)).any():
+            print(f"[ERROR] {name} is NaN or Inf! Value: {val}")
+            raise ValueError(f"{name} is NaN or Inf!")
+
     if keepdim:
         return {
             'total_loss': total_loss,
