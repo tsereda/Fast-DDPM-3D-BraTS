@@ -20,7 +20,7 @@ def get_timestep_embedding(timesteps, embedding_dim):
 
 
 def nonlinearity(x):
-    # swish activation
+    # Swish activation for improved expressivity
     return x * torch.sigmoid(x)
 
 
@@ -39,7 +39,7 @@ def Normalize(in_channels, num_groups=32):
     # For very small channel counts, use LayerNorm instead
     if in_channels <= 8:
         # LayerNorm over spatial dimensions for medical images
-        return nn.GroupNorm(num_groups=1, num_channels=in_channels, eps=1e-6, affine=True)
+        return nn.GroupNorm(num_groups=1, num_channels=in_channels, eps=1e-5, affine=True)
     
     # Ensure minimum 4 channels per group for stable statistics
     min_channels_per_group = 4
@@ -61,7 +61,7 @@ def Normalize(in_channels, num_groups=32):
             target = min(32, in_channels // 4)
             num_groups = min(possible_groups, key=lambda x: abs(x - target))
     
-    return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
+    return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-5, affine=True)
 
 
 class Upsample3D(nn.Module):
@@ -139,18 +139,6 @@ class ResnetBlock3D(nn.Module):
         return x + h
 
 
-import os
-import torch
-from torch.utils.data import Dataset
-import nibabel as nib
-import numpy as np
-from pathlib import Path
-import random
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 class FastDDPM3D(nn.Module):
     """3D Fast-DDPM for unified 4->1 BraTS modality synthesis"""
     
@@ -163,7 +151,7 @@ class FastDDPM3D(nn.Module):
         num_res_blocks = config.model.num_res_blocks
         dropout = config.model.dropout
         in_channels = config.model.in_channels
-        resolution = config.data.crop_size[0]  # Updated to use crop_size
+        resolution = config.data.volume_size[0] if hasattr(config.data, 'volume_size') else config.data.crop_size[0]
         resamp_with_conv = config.model.resamp_with_conv
         
         # Always use fixed variance for 3D
@@ -204,7 +192,7 @@ class FastDDPM3D(nn.Module):
                     dropout=dropout
                 ))
                 block_in = block_out
-                    
+                
             down = nn.Module()
             down.block = block
             if i_level != self.num_resolutions - 1:
@@ -245,7 +233,7 @@ class FastDDPM3D(nn.Module):
                     dropout=dropout
                 ))
                 block_in = block_out
-                    
+                
             up = nn.Module()
             up.block = block
             if i_level != 0:
@@ -289,13 +277,10 @@ class FastDDPM3D(nn.Module):
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
-        # Output with professor's recommended sigmoid activation
+        # Output - 🔥 CRITICAL FIX: NO sigmoid for diffusion models
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
         
-        # 🔥 CRITICAL FIX: Add sigmoid activation for [0,1] output
-        if getattr(self.config.model, 'use_sigmoid', True):
-            h = torch.sigmoid(h)
-        
+        # 🔥 REMOVED sigmoid activation - diffusion models predict noise, not images
         return h

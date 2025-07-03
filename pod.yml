@@ -9,17 +9,33 @@ spec:
     topology.kubernetes.io/region: us-west
     nautilus.io/linstor: "true"
   
+  # Add the toleration for GPU taint (now that you have permission!)
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: PreferNoSchedule
+  
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: nvidia.com/gpu.product
+            operator: In
+            values:
+            - NVIDIA-L40
+ 
   containers:
     - name: brats-processing
       image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp
-      
+     
       env:
         - name: REPO_PATH
           value: /app/Fast-DDPM-3D-BraTS
         - name: PYTHONPATH
           value: /app/Fast-DDPM-3D-BraTS
         - name: CUDA_VISIBLE_DEVICES
-          value: "0,1"
+          value: "0"
         # nnUNet paths
         - name: nnUNet_raw
           value: /app/nnunet/raw
@@ -36,22 +52,22 @@ spec:
           valueFrom:
             secretKeyRef:
               name: wandb-credentials
-              key: api-key  # Adjust this key name to match your secret
+              key: api-key
         - name: WANDB_PROJECT
           value: "fast-ddpm-3d-brats"
         - name: WANDB_ENTITY
-          value: "timgsereda"  # Replace with your W&B username/team
+          value: "timgsereda"
         - name: WANDB_MODE
-          value: "online"  # Change to "offline" if needed
-      
+          value: "online"
+     
       command: ["/bin/bash", "-c"]
       args:
         - |
-          git clone -b dev11 https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
+          git clone -b randomcropping https://github.com/tsereda/Fast-DDPM-3D-BraTS.git ${REPO_PATH}
           cd ${REPO_PATH}
-          
+         
           sudo apt-get update && sudo apt-get install -y p7zip-full wget git
-          
+         
           for dataset in "TrainingData" "ValidationData"; do
             zip_file="/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}.zip"
             if [ -f "$zip_file" ]; then
@@ -62,29 +78,26 @@ spec:
               ln -sf "/data/ASNR-MICCAI-BraTS2023-GLI-Challenge-${dataset}" .
             fi
           done
-          
+         
           pip install pyyaml torch tqdm numpy nibabel wandb matplotlib medpy
-          
+         
           echo "Checking W&B configuration..."
           python -c "import wandb; print(f'W&B version: {wandb.__version__}')"
-          
+         
           # Check available GPUs
           python -c "import torch; print(f'GPUs available: {torch.cuda.device_count()}')"
-          
-          echo "Starting multi-GPU training with W&B logging..."
-          PYTHONUNBUFFERED=1 python train_multi_gpu.py \
+         
+          echo "Starting training with W&B logging..."
+          PYTHONUNBUFFERED=1 python train.py \
             --data_root ASNR-MICCAI-BraTS2023-GLI-Challenge-TrainingData \
-            --gpus auto \
-            --use_ddp \
-            --port auto \
             --use_wandb \
             --sample_every 50 \
             --wandb_project ${WANDB_PROJECT} \
             --wandb_entity ${WANDB_ENTITY} \
-            --doc pod-multigpu-training-$(date +%Y%m%d-%H%M%S)
-          
+            --doc pod-training-$(date +%Y%m%d-%H%M%S)
+         
           tail -f /dev/null
-      
+     
       volumeMounts:
         - name: workspace
           mountPath: /app
@@ -92,17 +105,17 @@ spec:
           mountPath: /data
         - name: shm
           mountPath: /dev/shm
-      
+     
       resources:
         requests:
-          memory: 24Gi                # Increased for multi-GPU
-          cpu: "12"                   # Increased for multi-GPU
-          nvidia.com/gpu: "2"         # Request 2 GPUs (adjust as needed)
+          memory: 24Gi
+          cpu: "12"
+          nvidia.com/gpu: "1"
         limits:
           memory: 32Gi
           cpu: "16"
-          nvidia.com/gpu: "2"
-  
+          nvidia.com/gpu: "1"
+ 
   volumes:
     - name: workspace
       emptyDir:
@@ -114,5 +127,5 @@ spec:
       emptyDir:
         medium: Memory
         sizeLimit: 16Gi
-  
+ 
   restartPolicy: Never

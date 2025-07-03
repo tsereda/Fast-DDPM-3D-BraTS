@@ -3,9 +3,9 @@
 
 data:
     dataset: "BraTS3D"
-    crop_size: [64, 64, 64]      # Professor: Use cropping instead of rescaling
-    crops_per_volume: 4          # Multiple crops per MRI for data augmentation
-    channels: 1                  # Output channels (target modality)
+    crop_size: [64, 64, 64]   
+    crops_per_volume: 4    
+    channels: 1    
     num_workers: 4
     normalization: "min_max_0_1" # Professor: Min-max normalization to [0,1]
 
@@ -13,31 +13,31 @@ model:
     type: "unified_4to1"     # 4 input modalities → 1 target modality
     in_channels: 4           # Input: all 4 BraTS modalities
     out_ch: 1               # Output: single target modality
-    ch: 64                  # Base channels (reduced for 3D memory)
-    ch_mult: [1, 2, 4]      # Channel multipliers (3 levels for 3D)
-    num_res_blocks: 2       # ResNet blocks per level
-    attn_resolutions: [16]  # Attention at 16x16x16 resolution
+    ch: 32                  # 🔥 FIXED: Reduced from 64 to 32 for stability (~15M parameters)
+    ch_mult: [1, 2]         # 🔥 FIXED: Reduced from [1, 2, 4] to [1, 2] 
+    num_res_blocks: 1       # 🔥 FIXED: Reduced from 2 to 1 block per level
+    attn_resolutions: []    # 🔥 FIXED: Removed attention for stability
     dropout: 0.1
     var_type: fixedsmall    # Fixed variance (not learned)
     ema_rate: 0.9999        # Exponential moving average
     ema: True
     resamp_with_conv: True  # Use conv for up/downsampling
-    use_sigmoid: True       # Professor: Sigmoid activation for [0,1] output
+    use_sigmoid: False      # 🔥 FIXED: No sigmoid for diffusion models
 
 diffusion:
     beta_schedule: linear
     beta_start: 0.0001
-    beta_end: 0.02
+    beta_end: 0.02     
     num_diffusion_timesteps: 1000
 
 training:
-    batch_size: 4                  # Can be larger with cropping
+    batch_size: 1                 # Can be larger with cropping
     gradient_accumulation_steps: 2   # Effective batch size = batch_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.0001
+    learning_rate: 0.0001 
     weight_decay: 0.0
-    gradient_clip: 1.0
-    loss_type: "mse"               # Professor: Use MSE loss
+    gradient_clip: 1
+    loss_type: "mse" 
     
     # Checkpointing
     save_every: 2000                # Save every 2000 steps
@@ -46,7 +46,7 @@ training:
 
 optim:
     optimizer: "Adam"
-    lr: 0.00001                     # Same as training.learning_rate
+    lr: 0.0001
     beta1: 0.9
     weight_decay: 0.0
     amsgrad: false
@@ -57,7 +57,7 @@ sampling:
     timesteps: 10                   # Fast-DDPM: only 10 steps
     scheduler_type: "uniform"       # or "non-uniform"
     eta: 0.0                       # DDIM parameter
-    batch_size: 4
+    batch_size: 1
     
     # Noise initialization for [0,1] range
     init_type: "gaussian"          # Use Gaussian noise

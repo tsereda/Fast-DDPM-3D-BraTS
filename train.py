@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simplified training script for 3D Fast-DDPM on BraTS data
+Training script for 3D Fast-DDPM on BraTS dataset
 """
 
 import os
@@ -14,7 +14,6 @@ from tqdm import tqdm
 import logging
 import yaml
 import numpy as np
-import matplotlib.pyplot as plt
 
 # Add the current directory to path to import modules
 sys.path.append('.')
@@ -37,6 +36,269 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
+def sample_timesteps(t_intervals, batch_size):
+    """Simple timestep sampling"""
+    idx = torch.randint(0, len(t_intervals), size=(batch_size,))
+    return t_intervals[idx]
+
+
+
+def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=6):
+    """Generate and log samples to W&B"""
+    model.eval()
+    
+    with torch.no_grad():
+        try:
+            val_iter = iter(val_loader)
+            sample_batches = []
+            
+            # Collect samples
+            for _ in range(min(num_samples, len(val_loader))):
+                try:
+                    batch = next(val_iter)
+                    sample_batches.append(batch)
+                except StopIteration:
+                    break
+            
+            if not sample_batches:
+                return
+            
+            images_to_log = []
+            
+            for i, batch in enumerate(sample_batches):
+                inputs = batch['input'][:1].to(device)
+                targets = batch['target'][:1].unsqueeze(1).to(device)
+                target_idx = batch['target_idx'][0].item()
+                
+                # Generate samples
+                x_target_noise = torch.randn_like(targets)
+                
+                generated_sequence, x0_preds = unified_4to1_generalized_steps_3d(
+                    x=x_target_noise,
+                    x_available=inputs,
+                    target_idx=target_idx, 
+                    seq=t_intervals.cpu().numpy(),
+                    model=model,
+                    b=betas
+                )
+                
+                generated = generated_sequence[-1] if generated_sequence else None
+                
+                if generated is None:
+                    continue
+                
+                # Take middle slice for visualization
+                middle_slice = inputs.size(-1) // 2
+                
+                # Extract all modality images and target
+                modality_names = ['t1n', 't1c', 't2w', 't2f']
+                all_images = []
+                caption_parts = []
+                
+                # Normalize for display
+                def safe_normalize(img):
+                    img_min, img_max = img.min(), img.max()
+                    if img_max > img_min and not np.isnan(img_min) and not np.isnan(img_max):
+                        normalized = (img - img_min) / (img_max - img_min)
+                        return np.clip(normalized, 0, 1)
+                    else:
+                        return np.zeros_like(img)
+                
+                # Replace the target channel in inputs with the noise used for generation for visualization
+                inputs_with_noise = inputs.clone()
+                inputs_with_noise[0, target_idx] = x_target_noise[0, 0]
+
+                # Add all 4 input modalities (use inputs_with_noise for visualization)
+                for j in range(4):
+                    input_img = inputs_with_noise[0, j, :, :, middle_slice].cpu().numpy()
+                    input_img_norm = safe_normalize(input_img)
+                    all_images.append(input_img_norm)
+                    if j == target_idx:
+                        caption_parts.append(f"{modality_names[j]} (noise)")
+                    else:
+                        caption_parts.append(modality_names[j])
+                
+                # Add generated target (second to last)
+                gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
+                gen_img_norm = safe_normalize(gen_img)
+                all_images.append(gen_img_norm)
+                target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
+                caption_parts.append(f"{target_mod} Gen")
+                
+                # Add ground truth target (last)
+                target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
+                target_img_norm = safe_normalize(target_img)
+                all_images.append(target_img_norm)
+                caption_parts.append(f"{target_mod} GT")
+                
+                # Create side-by-side comparison (6 images total)
+                comparison = np.concatenate(all_images, axis=1)
+                comparison_uint8 = (comparison * 255).astype(np.uint8)
+                
+                # Create caption
+                caption = f"Sample {i+1}: " + " | ".join(caption_parts)
+                
+                # Create W&B image
+                wandb_img = wandb.Image(
+                    comparison_uint8,
+                    caption=caption
+                )
+                images_to_log.append(wandb_img)
+                
+                if len(images_to_log) >= num_samples:
+                    break
+            
+            # Log to W&B
+            if images_to_log:
+                wandb.log({
+                    "samples/generated_images": images_to_log,
+                    "samples/step": global_step,
+                    "samples/count": len(images_to_log)
+                }, step=global_step)
+            
+        except Exception as e:
+            logging.error(f"Failed to generate samples: {str(e)}")
+    
+    model.train()
+
+
+def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler, 
+                 betas, t_intervals, config, args, device):
+    """Simplified training loop"""
+    
+    # Setup W&B if requested
+    use_wandb = False
+    if args.use_wandb and WANDB_AVAILABLE:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=f"{args.doc}",
+            config=vars(args)
+        )
+        use_wandb = True
+        logging.info("W&B initialized successfully")
+    elif args.use_wandb and not WANDB_AVAILABLE:
+        logging.warning("W&B requested but not installed. Install with: pip install wandb")
+    
+    # Training parameters
+    global_step = 0
+    log_dir = os.path.join(args.exp, 'logs', args.doc)
+    os.makedirs(log_dir, exist_ok=True)
+    
+    logging.info("Starting training...")
+    logging.info(f"Batch size: {config.training.batch_size}")
+    logging.info(f"Log every: {config.training.log_every_n_steps} steps")
+    logging.info(f"Mixed precision: {not args.no_mixed_precision}")
+    
+    # Training loop
+    for epoch in range(config.training.epochs):
+        model.train()
+        epoch_loss = 0.0
+        valid_batches = 0
+        
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{config.training.epochs}')
+        
+        for batch_idx, batch in enumerate(pbar):
+            optimizer.zero_grad()
+            
+            try:
+                # Move data to device
+                inputs = batch['input'].to(device)
+                targets = batch['target'].unsqueeze(1).to(device)
+                target_idx = batch['target_idx'][0].item()
+                
+                # Input validation
+                if torch.isnan(inputs).any() or torch.isnan(targets).any():
+                    raise ValueError(f"NaN detected in batch {batch_idx}")
+                
+                if torch.isinf(inputs).any() or torch.isinf(targets).any():
+                    raise ValueError(f"Inf detected in batch {batch_idx}")
+                
+                n = inputs.size(0)
+                
+                # Timestep sampling
+                t = sample_timesteps(t_intervals, n).to(device)
+                e = torch.randn_like(targets)
+                
+                # Compute loss with mixed precision
+                with autocast(enabled=not args.no_mixed_precision):
+                    loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
+                
+                # Loss validation
+                if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
+                    raise ValueError(f"Invalid loss: {loss.item()}")
+                
+                # Backward pass
+                if args.no_mixed_precision:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
+                    optimizer.step()
+                else:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                
+                global_step += 1
+                epoch_loss += loss.item()
+                valid_batches += 1
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.6f}',
+                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
+                    'target': f'{target_idx}',
+                    'step': global_step
+                })
+                
+                # W&B logging
+                if use_wandb:
+                    wandb.log({
+                        'train/loss': loss.item(),
+                        'train/learning_rate': optimizer.param_groups[0]["lr"],
+                        'train/step': global_step,
+                        'train/target_idx': target_idx,
+                    }, step=global_step)
+                    
+                    # Generate and log samples for debugging
+                    if global_step % args.sample_every == 0 and global_step > 0:
+                        generate_and_log_samples(
+                            model, val_loader, betas, t_intervals, device, global_step, num_samples=6
+                        )
+                
+                # Periodic logging
+                if global_step % config.training.log_every_n_steps == 0:
+                    logging.info(f'Epoch {epoch+1}, Step {global_step} - Loss: {loss.item():.6f}, '
+                               f'LR: {optimizer.param_groups[0]["lr"]:.2e}, Target: {target_idx}')
+                    
+            except Exception as e:
+                logging.error(f"Training batch {batch_idx} failed: {str(e)}")
+                raise  # Fail fast instead of continuing
+        
+        # End of epoch
+        scheduler.step()
+        if valid_batches > 0:
+            avg_loss = epoch_loss / valid_batches
+            logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f} '
+                        f'({valid_batches}/{len(train_loader)} valid batches)')
+            
+            if use_wandb:
+                wandb.log({
+                    'epoch/avg_loss': avg_loss,
+                    'epoch/learning_rate': optimizer.param_groups[0]["lr"],
+                    'epoch/epoch': epoch + 1,
+                    'epoch/valid_batches': valid_batches,
+                }, step=global_step)
+        else:
+            logging.warning(f'Epoch {epoch+1} - No valid batches processed!')
+    
+    logging.info("Training completed!")
+    
+    if use_wandb:
+        wandb.finish()
+
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='3D Fast-DDPM Training for BraTS')
@@ -44,17 +306,32 @@ def parse_args():
     parser.add_argument('--data_root', type=str, required=True, help='Path to BraTS data')
     parser.add_argument('--exp', type=str, default='./experiments', help='Experiment directory')
     parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats', help='Experiment name')
-    parser.add_argument('--timesteps', type=int, default=10, help='Number of timesteps (Fast-DDPM advantage)')
+    parser.add_argument('--timesteps', type=int, default=10, help='Number of timesteps')
     parser.add_argument('--scheduler_type', type=str, default='uniform', choices=['uniform', 'non-uniform'], help='Timestep scheduler')
     parser.add_argument('--gpu', type=int, default=0, help='GPU ID')
     parser.add_argument('--resume', action='store_true', help='Resume training')
     parser.add_argument('--resume_path', type=str, help='Path to checkpoint to resume from')
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
-    parser.add_argument('--log_every_n_steps', type=int, default=50, help='Log training progress every N steps')
+    parser.add_argument('--log_every_n_steps', type=int, default=None, help='Log training progress every N steps (overrides config)')
+    parser.add_argument('--batch_size', type=int, default=None, help='Batch size (overrides config)')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
     parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
-    parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity (username or team)')
-    parser.add_argument('--sample_every', type=int, default=2000, help='Generate and log sample images to W&B every N steps')
+    parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity')
+    parser.add_argument('--sample_every', type=int, default=2000, help='Generate samples every N steps')
+    
+    # Training options
+    parser.add_argument('--no_mixed_precision', action='store_true', help='Disable mixed precision training')
+    parser.add_argument('--clip_norm', type=float, default=1.0, help='Gradient clipping norm')
+    
+    # Data processing options
+    parser.add_argument('--use_full_volumes', action='store_true', 
+                       help='Use full volumes instead of random patches')
+    parser.add_argument('--input_size', nargs=3, type=int, default=[80, 80, 80],
+                       help='Input size for full volumes (default: 80 80 80)')
+    parser.add_argument('--patch_size', nargs=3, type=int, default=[80, 80, 80],
+                       help='Patch size for patch-based training (default: 80 80 80)')
+    parser.add_argument('--crops_per_volume', type=int, default=4,
+                       help='Number of crops per volume for patch-based training (default: 4)')
 
     return parser.parse_args()
 
@@ -63,25 +340,42 @@ def setup_datasets(args, config):
     """Setup training and validation datasets"""
     logging.info("Setting up datasets...")
     
-    
-    # Check if data root exists
     if not os.path.exists(args.data_root):
         raise FileNotFoundError(f"Data root not found: {args.data_root}")
     
+    # Determine sizes based on mode
+    if args.use_full_volumes:
+        input_size = tuple(args.input_size)
+        crop_size = (64, 64, 64)  # Not used in full volume mode
+        mode_info = f"full volumes ({input_size})"
+    else:
+        input_size = tuple(args.patch_size)
+        crop_size = tuple(args.patch_size)
+        mode_info = f"patches ({crop_size})"
+    
+    logging.info(f"Data processing mode: {mode_info}")
+    
     train_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
-        phase='train'
+        phase='train',
+        crop_size=crop_size,
+        use_full_volumes=args.use_full_volumes,
+        input_size=input_size,
+        crops_per_volume=args.crops_per_volume
     )
     
     val_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
-        phase='val'
+        phase='val',
+        crop_size=crop_size,
+        use_full_volumes=args.use_full_volumes,
+        input_size=input_size,
+        crops_per_volume=1  # Always use 1 crop per volume for validation
     )
     
     if args.debug:
-        # Use smaller debug dataset
-        debug_train_size = min(50, len(train_dataset))
-        debug_val_size = min(10, len(val_dataset))
+        debug_train_size = min(10, len(train_dataset))
+        debug_val_size = min(5, len(val_dataset))
         train_indices = list(range(debug_train_size))
         val_indices = list(range(debug_val_size))
         train_dataset = Subset(train_dataset, train_indices)
@@ -91,23 +385,51 @@ def setup_datasets(args, config):
     return train_dataset, val_dataset
 
 
+def custom_collate_fn(batch):
+    """Custom collate function to handle string lists correctly"""
+    # Default collate for most fields
+    collated = {}
+    
+    # Handle each key separately
+    for key in batch[0].keys():
+        if key in ['available_modalities', 'successfully_loaded_modalities']:
+            # Keep list fields as lists of lists
+            collated[key] = [item[key] for item in batch]
+        elif key in ['case_name', 'target_modality', 'processing_mode']:
+            # String fields - keep as list of strings
+            collated[key] = [item[key] for item in batch]
+        elif key in ['target_idx']:
+            # Integer fields - convert to tensor
+            collated[key] = torch.tensor([item[key] for item in batch])
+        elif key == 'crop_coords':
+            # Keep as list of tuples (may be None for full volumes)
+            collated[key] = [item[key] for item in batch]
+        else:
+            # Tensor fields - use default stacking
+            collated[key] = torch.stack([item[key] for item in batch])
+    
+    return collated
+
+
 def setup_dataloaders(train_dataset, val_dataset, config):
     """Setup data loaders"""
     train_loader = DataLoader(
         train_dataset, 
         batch_size=config.training.batch_size,
         shuffle=True,
-        num_workers=getattr(config.data, 'num_workers', 4),
+        num_workers=getattr(config.data, 'num_workers', 2),
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        collate_fn=custom_collate_fn
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=1,  # Keep batch size 1 for validation
         shuffle=False,
-        num_workers=2,
-        pin_memory=True
+        num_workers=1,
+        pin_memory=True,
+        collate_fn=custom_collate_fn
     )
 
     logging.info(f"Train samples: {len(train_dataset)}")
@@ -128,7 +450,6 @@ def setup_model_and_optimizer(config, device):
     logging.info(f"Total parameters: {total_params:,}")
     logging.info(f"Trainable parameters: {trainable_params:,}")
     
-    # Optimizer and scheduler
     optimizer = torch.optim.Adam(
         model.parameters(), 
         lr=config.training.learning_rate,
@@ -147,7 +468,6 @@ def setup_model_and_optimizer(config, device):
 
 def setup_diffusion_and_scaler(config, device, args):
     """Setup diffusion parameters and gradient scaler"""
-    # Diffusion setup
     betas = get_beta_schedule(
         beta_schedule=config.diffusion.beta_schedule,
         beta_start=config.diffusion.beta_start,
@@ -159,306 +479,9 @@ def setup_diffusion_and_scaler(config, device, args):
     
     t_intervals = get_timestep_schedule(args.scheduler_type, args.timesteps, num_timesteps)
     
-    # Initialize gradient scaler
-    scaler = GradScaler()
+    scaler = GradScaler() if not args.no_mixed_precision else None
     
     return betas, t_intervals, scaler
-
-
-def validate_model(model, val_loader, device, betas, t_intervals):
-    """Simple validation function"""
-    model.eval()
-    total_loss = 0.0
-    num_batches = 0
-    
-    with torch.no_grad():
-        for batch in val_loader:
-            inputs = batch['input'].to(device)
-            targets = batch['target'].unsqueeze(1).to(device)
-            target_idx = batch['target_idx'][0].item()
-            
-            n = inputs.size(0)
-            idx = torch.randint(0, len(t_intervals), size=(n,))
-            t = t_intervals[idx].to(device)
-            e = torch.randn_like(targets)
-            
-            with autocast():
-                loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            if num_batches >= 10:  # Limit validation to 10 batches
-                break
-    
-    model.train()
-    return total_loss / max(num_batches, 1)
-
-
-def sample_and_log_images(model, val_loader, device, betas, t_intervals, step, use_wandb):
-    """Generate sample images and log comprehensive visualization to W&B"""
-    if not use_wandb:
-        return
-        
-    model.eval()
-    
-    try:
-        with torch.no_grad():
-            # Get a single validation batch for sampling
-            batch = next(iter(val_loader))
-            inputs = batch['input'][:1].to(device)  # Take only first sample
-            targets = batch['target'][:1].unsqueeze(1).to(device)
-            target_idx = batch['target_idx'][0].item()
-            
-            modality_names = ['t1n', 't1c', 't2w', 't2f']
-            target_name = modality_names[target_idx]
-            
-            # Create input for generation - mask the target modality
-            x_available = inputs.clone()
-            x_available[:, target_idx] = 0  # Zero out the target modality
-            
-            # Generate initial noise for target modality
-            noise_shape = targets.shape
-            x_noise = torch.randn(noise_shape).to(device)
-            
-            # Get sampling sequence (use subset of t_intervals for faster sampling)
-            seq = t_intervals[::len(t_intervals)//10].tolist() if len(t_intervals) > 10 else t_intervals.tolist()
-            
-            logging.info(f"Generating {target_name} from other modalities...")
-            
-            # Generate sample using the diffusion model
-            try:
-                xs, x0_preds = unified_4to1_generalized_steps_3d(
-                    x_noise, x_available, target_idx, seq, model, betas, eta=0.0
-                )
-                generated = xs[-1]  # Final generated sample
-            except Exception as gen_error:
-                logging.warning(f"Generation failed, using noise: {str(gen_error)}")
-                generated = x_noise
-            
-            # Convert tensors to numpy for visualization (using full volume for training)
-            inputs_np = inputs[0].cpu().numpy()  # Shape: (4, H, W, D)
-            targets_np = targets[0, 0].cpu().numpy()  # Shape: (H, W, D)
-            generated_np = generated[0, 0].cpu().numpy()  # Shape: (H, W, D)
-            x_noise_np = x_noise[0, 0].cpu().numpy()  # Shape: (H, W, D)
-            
-            # Get middle slice for visualization
-            mid_slice = targets_np.shape[2] // 2
-            
-            # Create comprehensive visualization with single slice
-            fig, axes = plt.subplots(1, 6, figsize=(24, 4))
-            fig.suptitle(f'Step {step}: Missing Modality Synthesis - {target_name.upper()}', 
-                        fontsize=18, fontweight='bold')
-            
-            # Normalize function for better visualization
-            def normalize_for_vis(img):
-                if img.max() > img.min():
-                    return (img - img.min()) / (img.max() - img.min())
-                return img
-            
-            # Column 0-3: Input modalities (including noise for target)
-            for i, mod_name in enumerate(modality_names):
-                ax = axes[i]
-                if i == target_idx:
-                    # Show the noisy input for the target modality
-                    img = normalize_for_vis(x_noise_np[:, :, mid_slice])
-                    ax.imshow(img, cmap='gray')
-                    ax.set_title(f'{mod_name.upper()}\n(Noise)', fontweight='bold', color='red')
-                else:
-                    # Show available input modalities
-                    img = normalize_for_vis(inputs_np[i, :, :, mid_slice])
-                    ax.imshow(img, cmap='gray')
-                    ax.set_title(f'{mod_name.upper()}\n(Available)', fontweight='bold', color='green')
-                ax.axis('off')
-            
-            # Column 4: Generated result
-            axes[4].imshow(normalize_for_vis(generated_np[:, :, mid_slice]), cmap='gray')
-            axes[4].set_title('Generated\n(Output)', fontweight='bold', color='blue')
-            axes[4].axis('off')
-            
-            # Column 5: Ground truth
-            axes[5].imshow(normalize_for_vis(targets_np[:, :, mid_slice]), cmap='gray')
-            axes[5].set_title('Ground Truth\n(Target)', fontweight='bold', color='orange')
-            axes[5].axis('off')
-            
-            plt.tight_layout()
-            
-            # Log only the comprehensive view to W&B
-            wandb.log({
-                f"samples/comprehensive_view": wandb.Image(fig, caption=f"Comprehensive view at step {step} - {target_name}")
-            }, step=step)
-            
-            plt.close(fig)
-            
-            logging.info(f"Comprehensive sample visualization logged to W&B at step {step}")
-            
-    except Exception as e:
-        logging.warning(f"Failed to generate and log sample images: {str(e)}")
-        import traceback
-        logging.warning(f"Traceback: {traceback.format_exc()}")
-    finally:
-        model.train()
-
-
-def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler, 
-                 betas, t_intervals, config, args, device):
-    """Simplified training loop"""
-    
-    # Setup W&B if requested
-    use_wandb = False
-    if args.use_wandb and WANDB_AVAILABLE:
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=f"{args.doc}",
-            config=vars(args)
-        )
-        use_wandb = True
-        logging.info("✅ W&B initialized successfully")
-    elif args.use_wandb and not WANDB_AVAILABLE:
-        logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
-    
-    # Training parameters
-    global_step = 0
-    best_val_loss = float('inf')
-    log_dir = os.path.join(args.exp, 'logs', args.doc)
-    os.makedirs(log_dir, exist_ok=True)
-    
-    logging.info("Starting training...")
-    logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
-    logging.info(f"Batch size: {config.training.batch_size}")
-    if use_wandb:
-        logging.info(f"W&B sampling every {args.sample_every} steps")
-    
-    # Training loop
-    for epoch in range(config.training.epochs):
-        model.train()
-        epoch_loss = 0.0
-        
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{config.training.epochs}')
-        
-        for batch_idx, batch in enumerate(pbar):
-            optimizer.zero_grad()
-            
-            # Move data to device
-            inputs = batch['input'].to(device)
-            targets = batch['target'].unsqueeze(1).to(device)
-            target_idx = batch['target_idx'][0].item()
-            
-            # Print original and crop sizes (only for first batch of first epoch)
-            if epoch == 0 and batch_idx == 0:
-                print(f"\n=== Data Size Information ===")
-                print(f"Input tensor shape: {inputs.shape}")  # [batch_size, 4, H, W, D]
-                print(f"Target tensor shape: {targets.shape}")  # [batch_size, 1, H, W, D]
-                print(f"Crop size used: {inputs.shape[2:]}")  # (H, W, D)
-                print(f"Case name: {batch['case_name'][0]}")
-                print(f"Target modality: {batch['target_modality'][0]}")
-                print(f"Available modalities: {batch['available_modalities'][0]}")
-                crop_coords = batch['crop_coords'][0]
-                print(f"Crop coordinates: {crop_coords}")
-                print(f"=== End Data Size Information ===\n")
-            
-            # Skip invalid data
-            if torch.isnan(inputs).any() or torch.isnan(targets).any():
-                logging.warning(f"Skipping batch {batch_idx} due to NaN values")
-                continue
-            
-            n = inputs.size(0)
-            
-            # Fast-DDPM antithetic sampling
-            idx_1 = torch.randint(0, len(t_intervals), size=(n // 2 + 1,))
-            idx_2 = len(t_intervals) - idx_1 - 1
-            idx = torch.cat([idx_1, idx_2], dim=0)[:n]
-            t = t_intervals[idx].to(device)
-            
-            e = torch.randn_like(targets)
-            
-            # Forward pass with autocast
-            with autocast():
-                loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
-            
-            # Skip if loss is invalid
-            if torch.isnan(loss) or torch.isinf(loss):
-                logging.warning(f"Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
-                continue
-            
-            # Backward pass
-            scaler.scale(loss).backward()
-            
-            # Gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # Optimizer step
-            scaler.step(optimizer)
-            scaler.update()
-            
-            global_step += 1
-            epoch_loss += loss.item()
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': f'{loss.item():.6f}',
-                'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
-                'target': f'{target_idx}',
-                'step': global_step
-            })
-            
-            # W&B logging
-            if use_wandb:
-                wandb.log({
-                    'train/loss': loss.item(),
-                    'train/learning_rate': optimizer.param_groups[0]["lr"],
-                    'train/epoch': epoch,
-                    'train/step': global_step,
-                    'train/target_idx': target_idx,
-                }, step=global_step)
-            
-            # Periodic logging
-            if global_step % args.log_every_n_steps == 0:
-                logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
-                           f'Step {global_step} - '
-                           f'Loss: {loss.item():.6f}, '
-                           f'Target: {target_idx}, '
-                           f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
-            
-            # Generate and log sample images
-            if global_step % args.sample_every == 0 and global_step > 0:
-                sample_and_log_images(model, val_loader, device, betas, t_intervals, global_step, use_wandb)
-            
-            # Validation
-            if global_step % 1000 == 0:
-                val_loss = validate_model(model, val_loader, device, betas, t_intervals)
-                logging.info(f'Step {global_step} - Val Loss: {val_loss:.6f}')
-                
-                if use_wandb:
-                    wandb.log({'val/loss': val_loss}, step=global_step)
-                
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    logging.info(f'New best validation loss: {val_loss:.6f}')
-                    if use_wandb:
-                        wandb.run.summary["best_val_loss"] = val_loss
-                        wandb.run.summary["best_val_step"] = global_step
-        
-        # End of epoch
-        scheduler.step()
-        avg_loss = epoch_loss / len(train_loader)
-        logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f}, '
-                    f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
-        
-        if use_wandb:
-            wandb.log({
-                'epoch/avg_loss': avg_loss,
-                'epoch/learning_rate': optimizer.param_groups[0]["lr"],
-                'epoch/epoch': epoch + 1,
-            }, step=global_step)
-    
-    logging.info("Training completed!")
-    logging.info(f"Best validation loss: {best_val_loss:.6f}")
-    
-    if use_wandb:
-        wandb.finish()
 
 
 def setup_logging(log_dir):
@@ -499,6 +522,21 @@ def main():
     except FileNotFoundError:
         logging.error(f"Config file not found: {args.config}")
         sys.exit(1)
+    
+    # Override config values with command line arguments
+    if args.batch_size is not None:
+        config.training.batch_size = args.batch_size
+        logging.info(f"Overriding batch size to: {args.batch_size}")
+    
+    if args.log_every_n_steps is not None:
+        config.training.log_every_n_steps = args.log_every_n_steps
+        logging.info(f"Overriding log frequency to every: {args.log_every_n_steps} steps")
+    
+    # Log data processing configuration
+    if args.use_full_volumes:
+        logging.info(f"Using full volume mode with input size: {tuple(args.input_size)}")
+    else:
+        logging.info(f"Using patch mode with patch size: {tuple(args.patch_size)}")
     
     config.device = device
     

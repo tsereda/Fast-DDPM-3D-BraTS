@@ -300,7 +300,7 @@ def main():
             
             # Initial noise - 🔥 FIXED: Appropriate range for [0,1] model
             noise_shape = (1, 1, *volume_size)
-            x = torch.rand(noise_shape).to(device)  # [0,1] noise instead of Gaussian
+            x = torch.randn(noise_shape).to(device)
             
             print(f"Input shape: {input_batch.shape}")
             print(f"Input range: [{input_batch.min():.3f}, {input_batch.max():.3f}]")
