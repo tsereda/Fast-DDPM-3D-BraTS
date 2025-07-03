@@ -38,8 +38,11 @@ def brats_4to1_loss(model,
     a = torch.clamp(a, min=1e-8, max=1.0)
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
     
+    # 🔥 FIX: Scale noise for [0,1] normalized data to prevent gradient explosion
+    e_scaled = e * 0.1  # Scale down from N(0,1) to N(0,0.1)
+    
     # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
-    x_noisy = x_target * a.sqrt() + e * (1.0 - a).sqrt()
+    x_noisy = x_target * a.sqrt() + e_scaled * (1.0 - a).sqrt()
     
     # Prepare model input: replace target channel with noisy version
     model_input = x_available.clone()
@@ -50,9 +53,9 @@ def brats_4to1_loss(model,
     
     # Use mean for proper loss scaling instead of sum
     if keepdim:
-        return (e - output).square().mean(dim=(1, 2, 3, 4))
+        return (e_scaled - output).square().mean(dim=(1, 2, 3, 4))
     else:
-        return (e - output).square().mean()
+        return (e_scaled - output).square().mean()
 
 
 def improved_brats_4to1_loss(model,
@@ -69,7 +72,7 @@ def improved_brats_4to1_loss(model,
     Improvements:
     - Better numerical stability with clamping
     - Focal loss weighting for harder examples
-    - Optional perceptual loss component
+    - Scaled noise for [0,1] normalized data
     """
     # Improved alpha computation with better numerical stability
     a = (1-b).cumprod(dim=0)
@@ -77,11 +80,14 @@ def improved_brats_4to1_loss(model,
     a = torch.clamp(a, min=1e-6, max=0.9999)
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
     
+    # 🔥 FIX: Scale noise for [0,1] normalized data
+    e_scaled = e * 0.1
+    
     # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
     a_sqrt = torch.clamp(a.sqrt(), min=1e-3, max=0.999)
     noise_coeff = torch.clamp((1.0 - a).sqrt(), min=1e-3, max=0.999)
     
-    x_noisy = x_target * a_sqrt + e * noise_coeff
+    x_noisy = x_target * a_sqrt + e_scaled * noise_coeff
     
     # Prepare model input: replace target channel with noisy version
     model_input = x_available.clone()
@@ -91,7 +97,7 @@ def improved_brats_4to1_loss(model,
     output = model(model_input, t.float())
     
     # Compute MSE loss
-    mse_loss = (e - output).square()
+    mse_loss = (e_scaled - output).square()
     
     # Apply focal weighting to focus on harder timesteps
     timestep_weights = 1.0 + 0.5 * (t.float() / 1000.0).view(-1, 1, 1, 1, 1)
