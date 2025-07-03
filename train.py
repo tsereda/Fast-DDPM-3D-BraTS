@@ -124,18 +124,18 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     else:
                         caption_parts.append(modality_names[j])
                 
-                # Add ground truth target
-                target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
-                target_img_norm = safe_normalize(target_img)
-                all_images.append(target_img_norm)
-                target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
-                caption_parts.append(f"{target_mod} GT")
-                
-                # Add generated target
+                # Add generated target (second to last)
                 gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
                 gen_img_norm = safe_normalize(gen_img)
                 all_images.append(gen_img_norm)
+                target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
                 caption_parts.append(f"{target_mod} Gen")
+                
+                # Add ground truth target (last)
+                target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
+                target_img_norm = safe_normalize(target_img)
+                all_images.append(target_img_norm)
+                caption_parts.append(f"{target_mod} GT")
                 
                 # Create side-by-side comparison (6 images total)
                 comparison = np.concatenate(all_images, axis=1)
