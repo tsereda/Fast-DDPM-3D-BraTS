@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed debug-enhanced training script for 3D Fast-DDPM
-Addresses dataset loading inconsistencies and W&B logging issues
+Training script for 3D Fast-DDPM on BraTS dataset
 """
 
 import os
@@ -15,7 +14,6 @@ from tqdm import tqdm
 import logging
 import yaml
 import numpy as np
-import matplotlib.pyplot as plt
 
 # Add the current directory to path to import modules
 sys.path.append('.')
@@ -55,16 +53,15 @@ def sample_timesteps(t_intervals, batch_size, method="antithetic"):
 
 
 def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=4):
-    """Fixed sample generation and W&B logging"""
+    """Generate and log samples to W&B"""
     model.eval()
     
     with torch.no_grad():
         try:
-            # Get a batch from validation set with proper batch size handling
             val_iter = iter(val_loader)
             sample_batches = []
             
-            # Collect enough samples (val_loader might have batch_size=1)
+            # Collect samples
             for _ in range(min(num_samples, len(val_loader))):
                 try:
                     batch = next(val_iter)
@@ -73,18 +70,16 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     break
             
             if not sample_batches:
-                logging.warning("No validation batches available for sampling")
                 return
             
-            # Process each sample individually
             images_to_log = []
             
             for i, batch in enumerate(sample_batches):
-                inputs = batch['input'][:1].to(device)  # Take first sample from batch
+                inputs = batch['input'][:1].to(device)
                 targets = batch['target'][:1].unsqueeze(1).to(device)
                 target_idx = batch['target_idx'][0].item()
                 
-                # Generate samples using the reverse process
+                # Generate samples
                 x_target_noise = torch.randn_like(targets)
                 
                 generated_sequence, x0_preds = unified_4to1_generalized_steps_3d(
@@ -96,189 +91,77 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     b=betas
                 )
                 
-                # Get the final generated sample
                 generated = generated_sequence[-1] if generated_sequence else None
                 
-                # Debug the generated output
                 if generated is None:
-                    logging.warning(f"Sample {i}: Generated samples is None")
                     continue
                 
-                # Create comparison images (take middle slice for visualization)
+                # Take middle slice for visualization
                 middle_slice = inputs.size(-1) // 2
                 
-                # Find available channels (non-target channels with actual data)
+                # Find available channels
                 available_channels = []
                 for j in range(4):
-                    if j != target_idx and torch.sum(inputs[0, j] > 0) > 100:  # Has significant data
+                    if j != target_idx and torch.sum(inputs[0, j] > 0) > 100:
                         available_channels.append(j)
                 
                 if not available_channels:
-                    available_channels = [j for j in range(4) if j != target_idx]  # Fallback
+                    available_channels = [j for j in range(4) if j != target_idx]
                 
-                # Original input (take first available non-target channel)
+                # Extract images
                 input_img = inputs[0, available_channels[0], :, :, middle_slice].cpu().numpy()
-                
-                # Ground truth target
                 target_img = targets[0, 0, :, :, middle_slice].cpu().numpy()
-                
-                # Generated sample
                 gen_img = generated[0, 0, :, :, middle_slice].cpu().numpy()
                 
-                # Debug image shapes and values
-                print(f"🔍 Sample {i} debug:")
-                print(f"  Input shape: {input_img.shape}, range: [{input_img.min():.4f}, {input_img.max():.4f}]")
-                print(f"  Target shape: {target_img.shape}, range: [{target_img.min():.4f}, {target_img.max():.4f}]")
-                print(f"  Generated shape: {gen_img.shape}, range: [{gen_img.min():.4f}, {gen_img.max():.4f}]")
-                
-                # Normalize for display with more robust handling
+                # Normalize for display
                 def safe_normalize(img):
                     img_min, img_max = img.min(), img.max()
                     if img_max > img_min and not np.isnan(img_min) and not np.isnan(img_max):
                         normalized = (img - img_min) / (img_max - img_min)
-                        # Ensure values are between 0 and 1
                         return np.clip(normalized, 0, 1)
                     else:
-                        # If all values are the same or NaN, create a black image
                         return np.zeros_like(img)
                 
                 input_img_norm = safe_normalize(input_img)
                 target_img_norm = safe_normalize(target_img)
                 gen_img_norm = safe_normalize(gen_img)
                 
-                print(f"  After normalization:")
-                print(f"    Input: [{input_img_norm.min():.4f}, {input_img_norm.max():.4f}]")
-                print(f"    Target: [{target_img_norm.min():.4f}, {target_img_norm.max():.4f}]")
-                print(f"    Generated: [{gen_img_norm.min():.4f}, {gen_img_norm.max():.4f}]")
-                
                 # Create side-by-side comparison
                 comparison = np.concatenate([input_img_norm, target_img_norm, gen_img_norm], axis=1)
-                
-                # Convert to proper format for W&B
                 comparison_uint8 = (comparison * 255).astype(np.uint8)
                 
-                # Verify the final image
-                print(f"  Final comparison shape: {comparison_uint8.shape}, range: [{comparison_uint8.min()}, {comparison_uint8.max()}]")
-                
+                # Create caption
                 modality_names = ['t1n', 't1c', 't2w', 't2f']
                 available_mod = modality_names[available_channels[0]]
                 target_mod = batch['target_modality'][0] if 'target_modality' in batch else modality_names[target_idx]
                 
-                # Create W&B image with explicit format
-                try:
-                    wandb_img = wandb.Image(
-                        comparison_uint8,
-                        caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
-                    )
-                    images_to_log.append(wandb_img)
-                    print(f"  ✅ Successfully created wandb.Image for sample {i+1}")
-                except Exception as img_e:
-                    print(f"  ❌ Failed to create wandb.Image for sample {i+1}: {img_e}")
-                    continue
+                # Create W&B image
+                wandb_img = wandb.Image(
+                    comparison_uint8,
+                    caption=f"Sample {i+1}: {available_mod} | {target_mod} GT | {target_mod} Generated"
+                )
+                images_to_log.append(wandb_img)
                 
-                # Only log up to num_samples
                 if len(images_to_log) >= num_samples:
                     break
             
             # Log to W&B
             if images_to_log:
-                print(f"📤 Attempting to log {len(images_to_log)} images to W&B...")
-                
-                try:
-                    # Log individual images with better error handling
-                    log_dict = {
-                        "samples/generated_images": images_to_log,
-                        "samples/step": global_step,
-                        "samples/count": len(images_to_log)
-                    }
-                    
-                    wandb.log(log_dict, step=global_step)
-                    print(f"  ✅ Successfully logged images to 'samples/generated_images'")
-                    
-                except Exception as wandb_e:
-                    print(f"  ❌ Failed to log images to W&B: {wandb_e}")
-                    # Try logging a simple test instead
-                    try:
-                        wandb.log({
-                            "debug/sample_generation_attempt": global_step,
-                            "debug/num_images_attempted": len(images_to_log)
-                        }, step=global_step)
-                        print(f"  ✅ Logged debug info instead")
-                    except Exception as debug_e:
-                        print(f"  ❌ Even debug logging failed: {debug_e}")
-                
-                # Also create matplotlib figure as backup
-                try:
-                    print("📊 Creating matplotlib figure as backup...")
-                    fig, axes = plt.subplots(1, len(images_to_log), figsize=(5*len(images_to_log), 5))
-                    if len(images_to_log) == 1:
-                        axes = [axes]
-                    
-                    for idx, img_data in enumerate(images_to_log):
-                        # Extract the actual image data from wandb.Image
-                        if hasattr(img_data, '_image'):
-                            img_array = img_data._image
-                        elif hasattr(img_data, 'image'):
-                            img_array = img_data.image
-                        else:
-                            # Fallback: use the original comparison from the loop
-                            img_array = (comparison * 255).astype(np.uint8)
-                        
-                        axes[idx].imshow(img_array, cmap='gray')
-                        axes[idx].set_title(f"Sample {idx+1}")
-                        axes[idx].axis('off')
-                    
-                    plt.tight_layout()
-                    
-                    wandb.log({
-                        "samples/combined_figure": wandb.Image(fig)
-                    }, step=global_step)
-                    
-                    plt.close(fig)
-                    print(f"  ✅ Successfully logged combined figure")
-                    
-                except Exception as fig_e:
-                    print(f"  ⚠️ Combined figure creation failed: {fig_e}")
-                
-                print(f"✅ Sample logging completed for step {global_step}")
-            else:
-                logging.warning("No valid samples generated for W&B logging")
+                wandb.log({
+                    "samples/generated_images": images_to_log,
+                    "samples/step": global_step,
+                    "samples/count": len(images_to_log)
+                }, step=global_step)
             
         except Exception as e:
             logging.error(f"Failed to generate samples: {str(e)}")
-            import traceback
-            logging.error(f"Traceback: {traceback.format_exc()}")
-            
-            # Try a simple test image to see if W&B image logging works
-            try:
-                print("🧪 Testing basic W&B image logging...")
-                test_img = np.random.rand(64, 192) * 255  # 3 side-by-side 64x64 images
-                test_img = test_img.astype(np.uint8)
-                wandb.log({
-                    "debug/test_image": wandb.Image(test_img, caption="Test image to verify W&B logging"),
-                    "debug/step": global_step,
-                    "debug/error_message": str(e)
-                }, step=global_step)
-                print("✅ Test image logged to W&B successfully")
-            except Exception as test_e:
-                print(f"❌ Even test image failed: {test_e}")
-                # Log basic metrics without images
-                try:
-                    wandb.log({
-                        "debug/sample_generation_failed": 1,
-                        "debug/failure_step": global_step,
-                        "debug/error": str(e)
-                    }, step=global_step)
-                    print("✅ Logged error info to W&B")
-                except Exception as metrics_e:
-                    print(f"❌ All W&B logging failed: {metrics_e}")
     
     model.train()
 
 
 def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, scaler, 
                        betas, t_intervals, config, args, device):
-    """Enhanced training loop with improved debugging"""
+    """Training loop"""
     
     # Setup W&B if requested
     use_wandb = False
@@ -290,9 +173,9 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
             config=vars(args)
         )
         use_wandb = True
-        logging.info("✅ W&B initialized successfully")
+        logging.info("W&B initialized successfully")
     elif args.use_wandb and not WANDB_AVAILABLE:
-        logging.warning("⚠️ W&B requested but not installed. Install with: pip install wandb")
+        logging.warning("W&B requested but not installed. Install with: pip install wandb")
     
     # Training parameters
     global_step = 0
@@ -300,20 +183,13 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
     log_dir = os.path.join(args.exp, 'logs', args.doc)
     os.makedirs(log_dir, exist_ok=True)
     
-    logging.info("Starting DEBUG training...")
-    logging.info(f"Scheduler type: {args.scheduler_type}, Timesteps: {args.timesteps}")
+    logging.info("Starting training...")
     logging.info(f"Batch size: {config.training.batch_size}")
-    logging.info(f"Use mixed precision: {not args.no_mixed_precision}")
-    logging.info(f"Timestep sampling method: {args.timestep_method}")
-    if use_wandb:
-        logging.info(f"W&B sampling every {args.sample_every} steps")
+    logging.info(f"Mixed precision: {not args.no_mixed_precision}")
     
     # Test W&B logging only
     if args.test_wandb_only:
-        print("🧪 Testing W&B logging only...")
-        # Test basic image logging first
-        test_wandb_image_logging(1)
-        # Then test full sample generation
+        print("Testing W&B logging only...")
         generate_and_log_samples(model, val_loader, betas, t_intervals, device, 1)
         print("W&B test completed. Exiting...")
         if use_wandb:
@@ -337,13 +213,13 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                 targets = batch['target'].unsqueeze(1).to(device)
                 target_idx = batch['target_idx'][0].item()
                 
-                # Enhanced input validation
+                # Input validation
                 if torch.isnan(inputs).any() or torch.isnan(targets).any():
-                    logging.warning(f"Skipping batch {batch_idx} due to NaN values in input")
+                    logging.warning(f"Skipping batch {batch_idx} due to NaN values")
                     continue
                 
                 if torch.isinf(inputs).any() or torch.isinf(targets).any():
-                    logging.warning(f"Skipping batch {batch_idx} due to Inf values in input")
+                    logging.warning(f"Skipping batch {batch_idx} due to Inf values")
                     continue
                 
                 n = inputs.size(0)
@@ -360,14 +236,10 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     with autocast():
                         loss = brats_4to1_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx)
                 
-                # Enhanced loss validation
+                # Loss validation
                 if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
                     logging.warning(f"Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
                     continue
-                
-                # Log loss for first few batches
-                if epoch == 0 and batch_idx <= 3:
-                    print(f"Batch {batch_idx}: Loss = {loss.item():.6f}")
                 
                 # Backward pass
                 if args.no_mixed_precision:
@@ -385,35 +257,18 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                         max_grad = max(max_grad, p.grad.abs().max().item())
                 total_norm = total_norm ** (1. / 2)
                 
-                # Detailed gradient analysis for first few batches
-                if epoch == 0 and batch_idx <= 3:
-                    print(f"Batch {batch_idx}: Gradient norm = {total_norm:.3f}, Max grad = {max_grad:.6f}")
-                    
-                    if total_norm > 5:
-                        print(f"🚨 Large gradients detected in batch {batch_idx}!")
-                        large_grad_params = []
-                        for name, param in model.named_parameters():
-                            if param.grad is not None:
-                                grad_norm = param.grad.norm().item()
-                                if grad_norm > 1.0:
-                                    large_grad_params.append(f"{name}: {grad_norm:.3f}")
-                        if large_grad_params:
-                            print(f"  Top gradient norms: {large_grad_params[:3]}")
-                
                 # Gradient explosion check
-                gradient_threshold = getattr(args, 'gradient_threshold', 50)
-                if total_norm > gradient_threshold:
+                if total_norm > args.gradient_threshold:
                     logging.warning(f"Large gradient norm detected: {total_norm:.3f}, skipping batch")
                     optimizer.zero_grad()
                     continue
                 
                 # Gradient clipping
-                clip_norm = getattr(args, 'clip_norm', 1.0)
                 if args.no_mixed_precision:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_norm)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
                 else:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_norm)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
                 
                 # Optimizer step
                 if args.no_mixed_precision:
@@ -431,8 +286,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     'loss': f'{loss.item():.6f}',
                     'lr': f'{optimizer.param_groups[0]["lr"]:.2e}',
                     'target': f'{target_idx}',
-                    'step': global_step,
-                    'grad_norm': f'{total_norm:.3f}'
+                    'step': global_step
                 })
                 
                 # W&B logging
@@ -445,30 +299,17 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                         'train/target_idx': target_idx,
                         'train/grad_norm': total_norm,
                         'train/max_grad': max_grad,
-                        'train/timesteps_mean': t.float().mean().item(),
-                        'train/timesteps_max': t.max().item(),
                     }, step=global_step)
                     
                     # Generate and log samples
                     if global_step % args.sample_every == 0 and global_step > 0:
-                        print(f"🔄 Generating samples at step {global_step}")
-                        
-                        # First test basic W&B image logging
-                        if global_step == args.sample_every:  # Only on first sampling
-                            test_wandb_image_logging(global_step)
-                        
                         generate_and_log_samples(
                             model, val_loader, betas, t_intervals, device, global_step
                         )
                 
-                # Periodic logging - reduce frequency
+                # Periodic logging
                 if global_step % (args.log_every_n_steps * 10) == 0:
-                    logging.info(f'Epoch {epoch+1}/{config.training.epochs}, '
-                               f'Step {global_step} - '
-                               f'Loss: {loss.item():.6f}, '
-                               f'Target: {target_idx}, '
-                               f'LR: {optimizer.param_groups[0]["lr"]:.2e}, '
-                               f'Grad: {total_norm:.3f}')
+                    logging.info(f'Epoch {epoch+1}, Step {global_step} - Loss: {loss.item():.6f}')
                 
                 # Early stopping for debugging
                 if args.debug_early_stop and batch_idx >= args.debug_early_stop:
@@ -477,8 +318,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     
             except Exception as e:
                 logging.warning(f"Training batch {batch_idx} failed: {str(e)}")
-                import traceback
-                logging.warning(f"Traceback: {traceback.format_exc()}")
                 optimizer.zero_grad()
                 continue
         
@@ -487,8 +326,7 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
         if valid_batches > 0:
             avg_loss = epoch_loss / valid_batches
             logging.info(f'Epoch {epoch+1} - Average Loss: {avg_loss:.6f} '
-                        f'({valid_batches}/{len(train_loader)} valid batches), '
-                        f'LR: {optimizer.param_groups[0]["lr"]:.2e}')
+                        f'({valid_batches}/{len(train_loader)} valid batches)')
             
             if use_wandb:
                 wandb.log({
@@ -496,7 +334,6 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
                     'epoch/learning_rate': optimizer.param_groups[0]["lr"],
                     'epoch/epoch': epoch + 1,
                     'epoch/valid_batches': valid_batches,
-                    'epoch/total_batches': len(train_loader),
                 }, step=global_step)
         else:
             logging.warning(f'Epoch {epoch+1} - No valid batches processed!')
@@ -507,19 +344,18 @@ def training_loop_debug(model, train_loader, val_loader, optimizer, scheduler, s
             break
     
     logging.info("Training completed!")
-    logging.info(f"Best validation loss: {best_val_loss:.6f}")
     
     if use_wandb:
         wandb.finish()
 
 
 def parse_args():
-    """Parse command line arguments with debug options"""
-    parser = argparse.ArgumentParser(description='3D Fast-DDPM Training for BraTS with Debug')
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='3D Fast-DDPM Training for BraTS')
     parser.add_argument('--config', type=str, default='configs/fast_ddpm_3d.yml', help='Path to config file')
     parser.add_argument('--data_root', type=str, required=True, help='Path to BraTS data')
     parser.add_argument('--exp', type=str, default='./experiments', help='Experiment directory')
-    parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats_debug_fixed', help='Experiment name')
+    parser.add_argument('--doc', type=str, default='fast_ddpm_3d_brats', help='Experiment name')
     parser.add_argument('--timesteps', type=int, default=10, help='Number of timesteps')
     parser.add_argument('--scheduler_type', type=str, default='uniform', choices=['uniform', 'non-uniform'], help='Timestep scheduler')
     parser.add_argument('--gpu', type=int, default=0, help='GPU ID')
@@ -528,11 +364,11 @@ def parse_args():
     parser.add_argument('--debug', action='store_true', help='Debug mode with smaller dataset')
     parser.add_argument('--log_every_n_steps', type=int, default=1, help='Log training progress every N steps')
     parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Biases for logging')
-    parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats-debug-fixed', help='W&B project name')
+    parser.add_argument('--wandb_project', type=str, default='fast-ddpm-3d-brats', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='W&B entity')
     parser.add_argument('--sample_every', type=int, default=2000, help='Generate samples every N steps')
     
-    # Debug-specific arguments
+    # Training options
     parser.add_argument('--no_mixed_precision', action='store_true', help='Disable mixed precision training')
     parser.add_argument('--timestep_method', type=str, default='antithetic', choices=['antithetic', 'simple'], 
                        help='Timestep sampling method')
@@ -680,47 +516,14 @@ def setup_logging(log_dir):
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(log_dir, 'training_debug_fixed.log')),
+            logging.FileHandler(os.path.join(log_dir, 'training.log')),
             logging.StreamHandler()
         ]
     )
 
 
-def test_wandb_image_logging(global_step):
-    """Test function to verify W&B image logging works"""
-    print("🧪 Testing W&B image logging functionality...")
-    
-    try:
-        # Create a simple test image
-        test_img = np.zeros((128, 384), dtype=np.uint8)  # 3 side-by-side 128x128 images
-        
-        # Fill with different patterns
-        test_img[:, :128] = 100  # Left section
-        test_img[:, 128:256] = 150  # Middle section  
-        test_img[:, 256:] = 200  # Right section
-        
-        # Add some pattern
-        test_img[::4, :] = 255  # White stripes
-        
-        # Create wandb image
-        wandb_test_img = wandb.Image(test_img, caption="Test pattern: Left | Middle | Right")
-        
-        # Log to wandb
-        wandb.log({
-            "test/simple_image": wandb_test_img,
-            "test/step": global_step
-        }, step=global_step)
-        
-        print("✅ Basic W&B image logging test passed!")
-        return True
-        
-    except Exception as e:
-        print(f"❌ W&B image logging test failed: {e}")
-        return False
-
-
 def main():
-    """Main training function with debug enhancements"""
+    """Main training function"""
     args = parse_args()
     
     # Setup device
@@ -759,15 +562,7 @@ def main():
     # Setup diffusion and gradient scaler
     betas, t_intervals, scaler = setup_diffusion_and_scaler(config, device, args)
     
-    # Debug diffusion setup
-    print(f"\n🔍 DIFFUSION SETUP DEBUG:")
-    print(f"Beta schedule: {config.diffusion.beta_schedule}")
-    print(f"Beta range: [{config.diffusion.beta_start}, {config.diffusion.beta_end}]")
-    print(f"Diffusion timesteps: {config.diffusion.num_diffusion_timesteps}")
-    print(f"Fast-DDPM timesteps: {args.timesteps}")
-    print(f"t_intervals: {t_intervals.cpu().numpy()}")
-    
-    # Run debug training loop
+    # Run training loop
     training_loop_debug(
         model, train_loader, val_loader, optimizer, scheduler, scaler,
         betas, t_intervals, config, args, device
