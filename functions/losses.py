@@ -7,13 +7,56 @@ np.bool = np.bool_
 
 
 def compute_3d_gradient(tensor):
-    """Compute 3D gradients for edge preservation"""
-    # Sobel-like 3D gradient computation
-    grad_x = F.conv3d(tensor, torch.tensor([[[[-1, 0, 1]]]]).float().to(tensor.device), padding=1)
-    grad_y = F.conv3d(tensor, torch.tensor([[[[-1], [0], [1]]]]).float().to(tensor.device), padding=1)
-    grad_z = F.conv3d(tensor, torch.tensor([[[[-1]], [[0]], [[1]]]]).float().to(tensor.device), padding=1)
-    
-    return torch.sqrt(grad_x**2 + grad_y**2 + grad_z**2 + 1e-8)
+    """Compute 3D gradients for edge preservation using proper 3D Sobel kernels"""
+    B, C, D, H, W = tensor.shape
+
+    # Define 3D Sobel kernels for x, y, z
+    kernel_x = torch.tensor(
+        [[[[[-1, 0, 1],
+            [-2, 0, 2],
+            [-1, 0, 1]],
+           [[-1, 0, 1],
+            [-2, 0, 2],
+            [-1, 0, 1]],
+           [[-1, 0, 1],
+            [-2, 0, 2],
+            [-1, 0, 1]]]]], dtype=tensor.dtype, device=tensor.device
+    )  # shape (1,1,3,3,3)
+
+    kernel_y = torch.tensor(
+        [[[[[-1, -2, -1],
+            [0, 0, 0],
+            [1, 2, 1]],
+           [[-1, -2, -1],
+            [0, 0, 0],
+            [1, 2, 1]],
+           [[-1, -2, -1],
+            [0, 0, 0],
+            [1, 2, 1]]]]], dtype=tensor.dtype, device=tensor.device
+    )
+
+    kernel_z = torch.tensor(
+        [[[[[-1, -1, -1],
+            [-2, -2, -2],
+            [-1, -1, -1]],
+           [[0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0]],
+           [[1, 1, 1],
+            [2, 2, 2],
+            [1, 1, 1]]]]], dtype=tensor.dtype, device=tensor.device
+    )
+
+    # Expand kernels to match input channels
+    kernel_x = kernel_x.expand(C, 1, 3, 3, 3)
+    kernel_y = kernel_y.expand(C, 1, 3, 3, 3)
+    kernel_z = kernel_z.expand(C, 1, 3, 3, 3)
+
+    grad_x = F.conv3d(tensor, kernel_x, padding=1, groups=C)
+    grad_y = F.conv3d(tensor, kernel_y, padding=1, groups=C)
+    grad_z = F.conv3d(tensor, kernel_z, padding=1, groups=C)
+
+    return torch.sqrt(grad_x ** 2 + grad_y ** 2 + grad_z ** 2 + 1e-8)
 
 
 def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
