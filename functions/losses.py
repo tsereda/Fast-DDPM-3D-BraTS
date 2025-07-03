@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+from functions.losses import get_loss_function
+
 np.bool = np.bool_
 
 
@@ -109,19 +111,29 @@ def get_loss_function(loss_type='brats_4to1'):
     
     Args:
         loss_type: str - type of loss function to use
-            - 'brats_4to1': BraTS 4→1 modality synthesis (recommended)
+            - 'brats_4to1': BraTS 4→1 modality synthesis (standard)
+            - 'improved_brats_4to1': Improved version with focal weighting (recommended)
         
     Returns:
         loss_function: callable loss function
     """
     if loss_type == 'brats_4to1':
         return brats_4to1_loss
+    elif loss_type == 'improved_brats_4to1':
+        return improved_brats_4to1_loss
     else:
-        raise ValueError(f"Unknown loss type '{loss_type}'. Available: ['brats_4to1']")
+        raise ValueError(f"Unknown loss type '{loss_type}'. Available: ['brats_4to1', 'improved_brats_4to1']")
 
 
 # Export list
 __all__ = [
     'brats_4to1_loss',              # Main BraTS 4→1 loss
+    'improved_brats_4to1_loss',     # Improved version with focal weighting
     'get_loss_function',            # Factory function
 ]
+
+# Get the improved loss function (recommended for stability)
+loss_fn = get_loss_function('improved_brats_4to1')
+
+# In your training loop:
+# loss = loss_fn(model, x_available, x_target, t, e, b=betas, target_idx=target_idx)
