@@ -27,17 +27,17 @@ model:
 diffusion:
     beta_schedule: linear
     beta_start: 0.0001
-    beta_end: 0.01                 # Reduced from 0.02 for gentler diffusion
+    beta_end: 0.02     
     num_diffusion_timesteps: 1000
 
 training:
     batch_size: 1                 # Can be larger with cropping
     gradient_accumulation_steps: 2   # Effective batch size = batch_size * gradient_accumulation_steps
     epochs: 1000
-    learning_rate: 0.00001         # 🔥 FIXED: Reduced from 0.0002 to 1e-5 for 3D stability
+    learning_rate: 0.0001 
     weight_decay: 0.0
-    gradient_clip: 0.1             # 🔥 FIXED: Much stricter gradient clipping
-    loss_type: "mse"               # Professor: Use MSE loss
+    gradient_clip: 1
+    loss_type: "mse" 
     
     # Checkpointing
     save_every: 2000                # Save every 2000 steps
@@ -46,7 +46,7 @@ training:
 
 optim:
     optimizer: "Adam"
-    lr: 0.00001                    # 🔥 FIXED: Match training.learning_rate (1e-5)
+    lr: 0.0001
     beta1: 0.9
     weight_decay: 0.0
     amsgrad: false

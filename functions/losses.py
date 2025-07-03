@@ -21,8 +21,7 @@ def brats_4to1_loss(model,
     a = torch.clamp(a, min=1e-8, max=1.0)
     a = a.index_select(0, t).view(-1, 1, 1, 1, 1)
     
-    # 🔥 NUCLEAR FIX: Scale noise down for [0,1] data to prevent gradient explosion
-    e_scaled = e * 0.01  # Increased from 0.001 to 0.01 for better gradient flow
+    e_scaled = e * 0.1  #
     
     # Add noise to target modality: X_t = sqrt(a) * x0 + sqrt(1-a) * noise
     x_noisy = x_target * a.sqrt() + e_scaled * (1.0 - a).sqrt()
