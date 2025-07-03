@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from functions.losses import get_loss_function
 
 np.bool = np.bool_
 
@@ -132,8 +131,8 @@ __all__ = [
     'get_loss_function',            # Factory function
 ]
 
-# Get the improved loss function (recommended for stability)
-loss_fn = get_loss_function('improved_brats_4to1')
+# Note: To use the improved loss function, call:
+# loss_fn = get_loss_function('improved_brats_4to1')
 
 # In your training loop:
 # loss = loss_fn(model, x_available, x_target, t, e, b=betas, target_idx=target_idx)
