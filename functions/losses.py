@@ -61,7 +61,7 @@ def compute_3d_gradient(tensor):
 
 
 def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
-    """Robust 3D SSIM for structural similarity with constant input handling and clamping."""
+    """Robust 3D SSIM for structural similarity with constant input handling and clamping. Includes debug logging for NaN/Inf."""
     # Create 3D Gaussian window
     coords = torch.arange(window_size, dtype=torch.float32, device=x.device)
     coords -= window_size // 2
@@ -92,6 +92,18 @@ def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
     denom = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
     denom = denom.clamp(min=eps)
     ssim_map = ((2*mu_xy + c1) * (2*sigma_xy + c2)) / denom
+
+    # Debug logging if NaN/Inf detected
+    if torch.isnan(ssim_map).any() or torch.isinf(ssim_map).any():
+        print("[SSIM DEBUG] NaN/Inf detected!")
+        print(f"x: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}")
+        print(f"y: min={y.min().item():.4f}, max={y.max().item():.4f}, mean={y.mean().item():.4f}")
+        print(f"mu_x: min={mu_x.min().item():.4f}, max={mu_x.max().item():.4f}, mean={mu_x.mean().item():.4f}")
+        print(f"mu_y: min={mu_y.min().item():.4f}, max={mu_y.max().item():.4f}, mean={mu_y.mean().item():.4f}")
+        print(f"sigma_x_sq: min={sigma_x_sq.min().item():.4f}, max={sigma_x_sq.max().item():.4f}, mean={sigma_x_sq.mean().item():.4f}")
+        print(f"sigma_y_sq: min={sigma_y_sq.min().item():.4f}, max={sigma_y_sq.max().item():.4f}, mean={sigma_y_sq.mean().item():.4f}")
+        print(f"denom: min={denom.min().item():.4f}, max={denom.max().item():.4f}, mean={denom.mean().item():.4f}")
+        print(f"ssim_map: min={ssim_map.min().item():.4f}, max={ssim_map.max().item():.4f}, mean={ssim_map.mean().item():.4f}")
 
     # Handle constant input: if both are constant and equal, return 1.0; if both constant and not equal, return 0.0
     is_const_x = (x.max(dim=2)[0].max(dim=2)[0].max(dim=2)[0] - x.min(dim=2)[0].min(dim=2)[0].min(dim=2)[0] < eps).all()
@@ -170,24 +182,8 @@ def brats_4to1_enhanced_loss(model,
                            loss_weights: dict = None,
                            keepdim=False):
     """
-    Enhanced BraTS 4→1 loss with perceptual components and best-practice NaN/Inf checks and normalization.
-    
-    Args:
-        model: The diffusion model
-        x_available: Available modalities [B, 4, H, W, D]
-        x_target: Target modality [B, 1, H, W, D]
-        t: Timesteps
-        e: Noise
-        b: Beta schedule
-        target_idx: Index of target modality
-        perceptual_net: Pre-trained perceptual network
-        loss_weights: Dictionary of loss component weights
-        keepdim: Whether to keep dimensions for batch-wise loss
-    
-    Returns:
-        Enhanced loss combining MSE, gradient, SSIM, and perceptual losses
+    Enhanced BraTS 4→1 loss with perceptual components and best-practice NaN/Inf checks. Now expects [-1,1] normalization (no [0,1] normalization inside loss).
     """
-    
     # Default loss weights - conservative to not break existing training
     if loss_weights is None:
         loss_weights = {
@@ -197,15 +193,9 @@ def brats_4to1_enhanced_loss(model,
             'perceptual': 0.05 # Feature matching (small weight)
         }
 
-    # --- Normalize input tensors to [0, 1] if not already ---
-    def normalize_tensor(x):
-        # Per-sample, per-channel normalization
-        x_min = x.amin(dim=(2,3,4), keepdim=True)
-        x_max = x.amax(dim=(2,3,4), keepdim=True)
-        return (x - x_min) / (x_max - x_min + 1e-6)
-
-    x_available = normalize_tensor(x_available)
-    x_target = normalize_tensor(x_target)
+    # --- REMOVE normalization: assume input is already in [-1,1] ---
+    # x_available = normalize_tensor(x_available)
+    # x_target = normalize_tensor(x_target)
 
     # Standard diffusion forward process
     a = (1-b).cumprod(dim=0)
