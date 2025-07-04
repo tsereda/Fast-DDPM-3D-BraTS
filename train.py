@@ -98,8 +98,9 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 # Normalize for display
                 def safe_normalize(img):
                     img_min, img_max = img.min(), img.max()
+                    # For [-1,1] normalization, rescale to [0,1] for display
                     if img_max > img_min and not np.isnan(img_min) and not np.isnan(img_max):
-                        normalized = (img - img_min) / (img_max - img_min)
+                        normalized = (img - (-1)) / 2  # [-1,1] -> [0,1]
                         return np.clip(normalized, 0, 1)
                     else:
                         return np.zeros_like(img)

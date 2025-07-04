@@ -7,7 +7,7 @@ data:
     crops_per_volume: 4    
     channels: 1    
     num_workers: 4
-    normalization: "min_max_0_1" # Professor: Min-max normalization to [0,1]
+    normalization: "min_max_-1_1" # Use min-max normalization to [-1,1] everywhere
 
 model:
     type: "unified_4to1"     # 4 input modalities → 1 target modality
@@ -59,10 +59,10 @@ sampling:
     eta: 0.0                       # DDIM parameter
     batch_size: 1
     
-    # Noise initialization for [0,1] range
+    # Noise initialization for [-1,1] range
     init_type: "gaussian"          # Use Gaussian noise
-    noise_std: 0.5                 # Reduced std for [0,1] range
-    noise_mean: 0.5                # Center noise in [0,1] range
+    noise_std: 1.0                 # Std for [-1,1] range
+    noise_mean: 0.0                # Center noise in [-1,1] range
 
 # Device and precision
 device: "cuda"

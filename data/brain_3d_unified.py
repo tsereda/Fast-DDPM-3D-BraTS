@@ -165,30 +165,38 @@ class BraTS3DUnifiedDataset(Dataset):
     def _normalize_volume(self, volume):
         """Normalize to [-1, 1] range"""
         if not np.any(volume > 0):
-            # ✅ FIXED: Return -1 for pure background, not 0!
-            return np.full_like(volume, -1.0)
+            return np.full_like(volume, -1.0)  # Background = -1 for [-1,1]
         v_min = np.amin(volume)
         v_max = np.amax(volume)
         if v_max > v_min:
             volume = 2 * (volume - v_min) / (v_max - v_min) - 1
         return np.clip(volume, -1.0, 1.0)
     
+    def validate_normalization_consistency(self, sample):
+        """Validate that normalization is consistent with [-1,1]"""
+        target_min, target_max = sample['target'].min(), sample['target'].max()
+        input_min, input_max = sample['input'].min(), sample['input'].max()
+        assert target_min >= -1 and target_max <= 1, f"Target range [{target_min}, {target_max}] not in [-1,1]"
+        assert input_min >= -1 and input_max <= 1, f"Input range [{input_min}, {input_max}] not in [-1,1]"
+    
     def debug_normalization(self, idx=0):
-        """Debug normalization values"""
+        """Debug normalization values for [-1,1] range"""
         sample = self[idx]
         target = sample['target']
         inputs = sample['input']
         
-        print(f"Target range: [{target.min():.3f}, {target.max():.3f}]")
-        print(f"Background values in target: {target[target < -0.5].unique()}")
-        print(f"Input ranges: {[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}")
+        print(f"Target range: [{{target.min():.3f}}, {{target.max():.3f}}]")
+        print(f"Background values in target: {{target[target < -0.5].unique()}}")
+        print(f"Input ranges: {{[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}}")
         
         # Check if background is actually -1
         background_mask = target < -0.5
         if background_mask.any():
             bg_vals = target[background_mask]
-            print(f"Background values: min={bg_vals.min():.3f}, max={bg_vals.max():.3f}, mean={bg_vals.mean():.3f}")
-            print(f"Background should be -1.0, is it? {torch.allclose(bg_vals, torch.tensor(-1.0), atol=1e-3)}")
+            print(f"Background values: min={{bg_vals.min():.3f}}, max={{bg_vals.max():.3f}}, mean={{bg_vals.mean():.3f}}")
+            print(f"Background should be -1.0, is it? {{torch.allclose(bg_vals, torch.tensor(-1.0), atol=1e-3)}}")
+        
+        self.validate_normalization_consistency(sample)
         
         return sample
     
