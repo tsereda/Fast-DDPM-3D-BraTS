@@ -246,6 +246,19 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                       f"Perceptual: {loss_dict['perceptual_loss']:.4f}, "
                       f"Total: {loss.item():.4f}")
 
+                # W&B logging for each loss component
+                if use_wandb:
+                    wandb.log({
+                        'train/loss': loss.item(),
+                        'train/loss_mse': float(loss_dict['mse_loss']),
+                        'train/loss_gradient': float(loss_dict['gradient_loss']),
+                        'train/loss_ssim': float(loss_dict['ssim_loss']),
+                        'train/loss_perceptual': float(loss_dict['perceptual_loss']),
+                        'train/learning_rate': optimizer.param_groups[0]["lr"],
+                        'train/step': global_step,
+                        'train/target_idx': target_idx,
+                    }, step=global_step)
+
                 # Loss validation
                 if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
                     raise ValueError(f"Invalid loss: {loss.item()}")
