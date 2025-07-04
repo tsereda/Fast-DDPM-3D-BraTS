@@ -580,7 +580,8 @@ def main():
         logging.info(f"Overriding batch size to: {args.batch_size}")
     
     if args.log_every_n_steps is not None:
-        config.training.log_every_n_steps = args.log_every_n_steps
+        
+        fig.training.log_every_n_steps = args.log_every_n_steps
         logging.info(f"Overriding log frequency to every: {args.log_every_n_steps} steps")
     
     # Log data processing configuration
@@ -603,6 +604,18 @@ def main():
     
     # Setup diffusion and gradient scaler
     betas, t_intervals, scaler = setup_diffusion_and_scaler(config, device, args)
+    
+    # Debug normalization for a few samples
+    if hasattr(train_dataset, 'debug_normalization'):
+        print("\n--- Debugging normalization for training set ---")
+        for idx in range(min(3, len(train_dataset))):
+            print(f"\nSample {idx} normalization stats:")
+            train_dataset.debug_normalization(idx=idx)
+    if hasattr(val_dataset, 'debug_normalization'):
+        print("\n--- Debugging normalization for validation set ---")
+        for idx in range(min(3, len(val_dataset))):
+            print(f"\nSample {idx} normalization stats:")
+            val_dataset.debug_normalization(idx=idx)
     
     # Run training loop
     training_loop(
