@@ -12,13 +12,13 @@ logger = logging.getLogger(__name__)
 
 class BraTS3DUnifiedDataset(Dataset):
     """
-    Fixed BraTS 3D dataset with corrected available_modalities reporting
-    and improved debugging capabilities
+    Fixed BraTS 3D dataset with proper background detection
+    Uses intensity-based thresholding instead of exact zero detection
     """
     
     def __init__(self, data_root, phase='train', crop_size=(64, 64, 64), 
                  min_input_modalities=3, crops_per_volume=4, use_full_volumes=False,
-                 input_size=(80, 80, 80)):
+                 input_size=(80, 80, 80), background_threshold_percent=0.01):
         self.data_root = Path(data_root)
         self.phase = phase
         self.crop_size = tuple(crop_size)
@@ -26,6 +26,7 @@ class BraTS3DUnifiedDataset(Dataset):
         self.min_input_modalities = min_input_modalities
         self.crops_per_volume = crops_per_volume
         self.use_full_volumes = use_full_volumes
+        self.background_threshold_percent = background_threshold_percent  # 1% of max intensity
         
         # Standard BraTS modalities
         self.modalities = ['t1n', 't1c', 't2w', 't2f']
@@ -162,14 +163,34 @@ class BraTS3DUnifiedDataset(Dataset):
         
         return crop
     
+    def _detect_background(self, volume):
+        """
+        🔥 FIXED: Detect background using intensity-based thresholding
+        Instead of exact zero detection, use percentage of max intensity
+        """
+        if not np.any(volume > 0):
+            return np.ones_like(volume, dtype=bool)  # All background
+        
+        # Calculate threshold as percentage of max intensity
+        v_max = np.amax(volume)
+        threshold = self.background_threshold_percent * v_max
+        
+        # Background is anything below threshold
+        background_mask = volume <= threshold
+        
+        return background_mask
+    
     def _normalize_volume(self, volume):
         """Normalize to [-1, 1] range"""
         if not np.any(volume > 0):
-            return np.full_like(volume, -1.0)  # Background = -1 for [-1,1]
+            return np.full_like(volume, -1.0)  # All background = -1
+        
         v_min = np.amin(volume)
         v_max = np.amax(volume)
+        
         if v_max > v_min:
             volume = 2 * (volume - v_min) / (v_max - v_min) - 1
+        
         return np.clip(volume, -1.0, 1.0)
     
     def validate_normalization_consistency(self, sample):
@@ -186,15 +207,21 @@ class BraTS3DUnifiedDataset(Dataset):
         inputs = sample['input']
         
         print(f"Target range: [{target.min():.3f}, {target.max():.3f}]")
-        print(f"Background values in target: {target[target < -0.5].unique()}")
-        print(f"Input ranges: {[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}")
         
-        # Check if background is actually -1
-        background_mask = target < -0.5
+        # Check background values
+        background_mask = target < -0.8  # More lenient threshold for debugging
         if background_mask.any():
             bg_vals = target[background_mask]
-            print(f"Background values: min={bg_vals.min():.3f}, max={bg_vals.max():.3f}, mean={bg_vals.mean():.3f}")
-            print(f"Background should be -1.0, is it? {torch.allclose(bg_vals, torch.tensor(-1.0), atol=1e-3)}")
+            unique_bg = bg_vals.unique()
+            print(f"Background values: {len(unique_bg)} unique values")
+            print(f"Background range: [{bg_vals.min():.3f}, {bg_vals.max():.3f}], mean={bg_vals.mean():.3f}")
+            
+            # Check if most background is -1.0
+            exact_minus_one = (bg_vals == -1.0).sum().item()
+            total_bg = bg_vals.numel()
+            print(f"Exact -1.0 background: {exact_minus_one}/{total_bg} ({100*exact_minus_one/total_bg:.1f}%)")
+        
+        print(f"Input ranges: {[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}")
         
         self.validate_normalization_consistency(sample)
         
@@ -242,13 +269,18 @@ class BraTS3DUnifiedDataset(Dataset):
             # Full volume mode: resize to input_size
             for modality in self.modalities:
                 volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
-                # Track background before resizing
-                bg_mask = (volume == 0).astype(np.float32)
+                
+                # 🔥 FIXED: Detect background BEFORE resizing
+                bg_mask = self._detect_background(volume)
+                
+                # Resize volume and background mask
                 resized = self._resize_volume(volume, target_size)
-                resized_mask = self._resize_volume(bg_mask, target_size) >= 0.5  # threshold to get bool mask
+                resized_bg_mask = self._resize_volume(bg_mask.astype(np.float32), target_size) >= 0.5
+                
+                # Normalize and force background to -1.0
                 normalized = self._normalize_volume(resized)
-                # Force background voxels to -1.0
-                normalized[resized_mask] = -1.0
+                normalized[resized_bg_mask] = -1.0
+                
                 processed_volumes[modality] = torch.FloatTensor(normalized)
         else:
             # Patch mode: extract random crops
@@ -257,13 +289,18 @@ class BraTS3DUnifiedDataset(Dataset):
             
             for modality in self.modalities:
                 volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
-                # Track background before cropping
-                bg_mask = (volume == 0).astype(np.float32)
+                
+                # 🔥 FIXED: Detect background BEFORE cropping
+                bg_mask = self._detect_background(volume)
+                
+                # Extract crops
                 cropped = self._extract_crop(volume, crop_coords)
-                cropped_mask = self._extract_crop(bg_mask, crop_coords) >= 0.5
+                cropped_bg_mask = self._extract_crop(bg_mask.astype(np.float32), crop_coords) >= 0.5
+                
+                # Normalize and force background to -1.0
                 normalized = self._normalize_volume(cropped)
-                # Force background voxels to -1.0
-                normalized[cropped_mask] = -1.0
+                normalized[cropped_bg_mask] = -1.0
+                
                 processed_volumes[modality] = torch.FloatTensor(normalized)
         
         # Select target modality from successfully loaded modalities
@@ -277,11 +314,10 @@ class BraTS3DUnifiedDataset(Dataset):
         target_idx = self.modalities.index(target_modality)
         target_volume = processed_volumes[target_modality]
         
-        # FIXED: Create input with target modality replaced by ZEROS
+        # Create input with target modality replaced by ZEROS
         input_modalities = torch.stack([processed_volumes[mod] for mod in self.modalities])
         input_modalities[target_idx] = torch.zeros_like(input_modalities[target_idx])
         
-        # FIXED: Correct available_modalities reporting
         # Available modalities are the 3 non-target modalities that were successfully loaded
         available_non_target_modalities = [mod for mod in successfully_loaded_modalities if mod != target_modality]
         
