@@ -242,8 +242,13 @@ class BraTS3DUnifiedDataset(Dataset):
             # Full volume mode: resize to input_size
             for modality in self.modalities:
                 volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
+                # Track background before resizing
+                bg_mask = (volume == 0).astype(np.float32)
                 resized = self._resize_volume(volume, target_size)
+                resized_mask = self._resize_volume(bg_mask, target_size) >= 0.5  # threshold to get bool mask
                 normalized = self._normalize_volume(resized)
+                # Force background voxels to -1.0
+                normalized[resized_mask] = -1.0
                 processed_volumes[modality] = torch.FloatTensor(normalized)
         else:
             # Patch mode: extract random crops
@@ -252,8 +257,13 @@ class BraTS3DUnifiedDataset(Dataset):
             
             for modality in self.modalities:
                 volume = modality_volumes.get(modality, np.zeros(volume_shape, dtype=np.float32))
+                # Track background before cropping
+                bg_mask = (volume == 0).astype(np.float32)
                 cropped = self._extract_crop(volume, crop_coords)
+                cropped_mask = self._extract_crop(bg_mask, crop_coords) >= 0.5
                 normalized = self._normalize_volume(cropped)
+                # Force background voxels to -1.0
+                normalized[cropped_mask] = -1.0
                 processed_volumes[modality] = torch.FloatTensor(normalized)
         
         # Select target modality from successfully loaded modalities
