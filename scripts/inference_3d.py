@@ -136,16 +136,17 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
         data = data[8:152, 24:216, 24:216]
         return data
     
-    def normalize_volume_0_1(volume):
+    def normalize_volume(volume):
         """
-        🔥 FIXED: Professor's [0,1] normalization (not [-1,1])
+        Normalize to [-1, 1] range (to match training)
         """
+        if not np.any(volume > 0):
+            return np.full_like(volume, -1.0)
         v_min = np.amin(volume)
-        v_max = np.amax(volume) 
+        v_max = np.amax(volume)
         if v_max > v_min:
-            # Normalize to [0,1] range to match training data
-            volume = (volume - v_min) / (v_max - v_min)
-        return np.clip(volume, 0.0, 1.0)
+            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
+        return np.clip(volume, -1.0, 1.0)
     
     # Find available files
     vol_files = find_modality_files(case_path, modalities)
@@ -161,7 +162,7 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
             nifti_img = nib.load(str(file_path))
             nifti_img = reorient_volume(nifti_img)
             data = crop_volume(nifti_img)
-            data = normalize_volume_0_1(data)  # 🔥 FIXED: [0,1] not [-1,1]
+            data = normalize_volume(data)  # Enforce [-1,1] normalization
             
             # Resize if needed
             if data.shape != volume_size:
@@ -201,16 +202,14 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
 
 def save_generated_volume(volume, affine, output_path):
     """
-    🔥 FIXED: Save generated volume assuming [0,1] input range
+    Save generated volume assuming [-1,1] input range
     """
     volume_np = volume.cpu().numpy()
-    
-    # Already in [0,1] range from sigmoid output
+    # Denormalize from [-1,1] to [0,1] for saving
+    volume_np = (volume_np + 1) / 2
     volume_np = np.clip(volume_np, 0, 1)
-    
     # Scale to appropriate intensity range (0-1000 for medical images)
     volume_np = (volume_np * 1000).astype(np.float32)
-    
     # Create NIfTI image
     nifti_img = nib.Nifti1Image(volume_np, affine)
     nib.save(nifti_img, output_path)
