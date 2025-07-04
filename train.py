@@ -580,8 +580,7 @@ def main():
         logging.info(f"Overriding batch size to: {args.batch_size}")
     
     if args.log_every_n_steps is not None:
-        
-        fig.training.log_every_n_steps = args.log_every_n_steps
+        config.training.log_every_n_steps = args.log_every_n_steps
         logging.info(f"Overriding log frequency to every: {args.log_every_n_steps} steps")
     
     # Log data processing configuration
