@@ -188,7 +188,7 @@ def brats_4to1_enhanced_loss(model,
     if loss_weights is None:
         loss_weights = {
             'mse': 1.0,        # Main loss
-            'gradient': 0.1,   # Edge preservation
+            'gradient': 0,   # Edge preservation
             'ssim': 0.1,       # Structural similarity
             'perceptual': 0.05 # Feature matching (small weight)
         }
