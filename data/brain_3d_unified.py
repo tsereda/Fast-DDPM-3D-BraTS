@@ -181,17 +181,34 @@ class BraTS3DUnifiedDataset(Dataset):
         return background_mask
     
     def _normalize_volume(self, volume):
-        """Normalize to [-1, 1] range"""
+        """Improved normalization with consistent background"""
+        # Detect background first
         if not np.any(volume > 0):
-            return np.full_like(volume, -1.0)  # All background = -1
+            return np.full_like(volume, -1.0)
         
-        v_min = np.amin(volume)
-        v_max = np.amax(volume)
+        # Use percentile-based background detection
+        threshold = np.percentile(volume[volume > 0], 5)
+        background_mask = volume <= threshold
+        foreground_mask = ~background_mask
         
-        if v_max > v_min:
-            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
+        # Initialize with background value
+        normalized = np.full_like(volume, -1.0)
         
-        return np.clip(volume, -1.0, 1.0)
+        # Normalize foreground using percentiles
+        foreground_values = volume[foreground_mask]
+        if len(foreground_values) > 0:
+            v_low = np.percentile(foreground_values, 1)
+            v_high = np.percentile(foreground_values, 99)
+            
+            if v_high > v_low:
+                # Scale to [-1, 1] range
+                scale = 2.0 / (v_high - v_low)
+                normalized[foreground_mask] = -1.0 + (volume[foreground_mask] - v_low) * scale
+        
+        # Ensure exact range
+        normalized = np.clip(normalized, -1.0, 1.0)
+        
+        return normalized
     
     def validate_normalization_consistency(self, sample):
         """Validate that normalization is consistent with [-1,1]"""

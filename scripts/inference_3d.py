@@ -138,15 +138,26 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
     
     def normalize_volume(volume):
         """
-        Normalize to [-1, 1] range (to match training)
+        Percentile-based normalization with robust background masking (matches training)
         """
         if not np.any(volume > 0):
             return np.full_like(volume, -1.0)
-        v_min = np.amin(volume)
-        v_max = np.amax(volume)
-        if v_max > v_min:
-            volume = 2 * (volume - v_min) / (v_max - v_min) - 1
-        return np.clip(volume, -1.0, 1.0)
+        # Use percentile-based background detection
+        threshold = np.percentile(volume[volume > 0], 5)
+        background_mask = volume <= threshold
+        foreground_mask = ~background_mask
+        # Initialize with background value
+        normalized = np.full_like(volume, -1.0)
+        # Normalize foreground using percentiles
+        foreground_values = volume[foreground_mask]
+        if len(foreground_values) > 0:
+            v_low = np.percentile(foreground_values, 1)
+            v_high = np.percentile(foreground_values, 99)
+            if v_high > v_low:
+                scale = 2.0 / (v_high - v_low)
+                normalized[foreground_mask] = -1.0 + (volume[foreground_mask] - v_low) * scale
+        normalized = np.clip(normalized, -1.0, 1.0)
+        return normalized
     
     # Find available files
     vol_files = find_modality_files(case_path, modalities)
