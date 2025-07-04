@@ -46,6 +46,7 @@ def sample_timesteps(t_intervals, batch_size):
 def generate_and_log_samples(model, val_loader, betas, t_intervals, device, global_step, num_samples=6):
     """Generate and log samples to W&B"""
     model.eval()
+    logging.info(f"[Sample] Attempting to generate samples at step {global_step} (val_loader batches: {len(val_loader)})")
     
     with torch.no_grad():
         try:
@@ -61,7 +62,8 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                     break
             
             if not sample_batches:
-                return
+                logging.warning(f"[Sample] No validation batches available for sample generation at step {global_step}.")
+                raise RuntimeError("No validation batches available for sample generation.")
             
             images_to_log = []
             
@@ -85,6 +87,7 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
                 generated = generated_sequence[-1] if generated_sequence else None
                 
                 if generated is None:
+                    logging.warning(f"[Sample] No generated output for sample {i} at step {global_step}.")
                     continue
                 
                 # Take middle slice for visualization
@@ -150,14 +153,19 @@ def generate_and_log_samples(model, val_loader, betas, t_intervals, device, glob
             
             # Log to W&B
             if images_to_log:
+                logging.info(f"[Sample] Logging {len(images_to_log)} images to W&B at step {global_step}.")
                 wandb.log({
                     "samples/generated_images": images_to_log,
                     "samples/step": global_step,
                     "samples/count": len(images_to_log)
                 }, step=global_step)
-            
+            else:
+                logging.warning(f"[Sample] No images generated for logging at step {global_step}.")
+                raise RuntimeError("No images generated for logging.")
+        
         except Exception as e:
             logging.error(f"Failed to generate samples: {str(e)}")
+            raise  # Raise so you see the error in the main log
     
     model.train()
 
