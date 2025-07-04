@@ -165,12 +165,32 @@ class BraTS3DUnifiedDataset(Dataset):
     def _normalize_volume(self, volume):
         """Normalize to [-1, 1] range"""
         if not np.any(volume > 0):
-            return np.zeros_like(volume)
+            # ✅ FIXED: Return -1 for pure background, not 0!
+            return np.full_like(volume, -1.0)
         v_min = np.amin(volume)
         v_max = np.amax(volume)
         if v_max > v_min:
             volume = 2 * (volume - v_min) / (v_max - v_min) - 1
         return np.clip(volume, -1.0, 1.0)
+    
+    def debug_normalization(self, idx=0):
+        """Debug normalization values"""
+        sample = self[idx]
+        target = sample['target']
+        inputs = sample['input']
+        
+        print(f"Target range: [{target.min():.3f}, {target.max():.3f}]")
+        print(f"Background values in target: {target[target < -0.5].unique()}")
+        print(f"Input ranges: {[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}")
+        
+        # Check if background is actually -1
+        background_mask = target < -0.5
+        if background_mask.any():
+            bg_vals = target[background_mask]
+            print(f"Background values: min={bg_vals.min():.3f}, max={bg_vals.max():.3f}, mean={bg_vals.mean():.3f}")
+            print(f"Background should be -1.0, is it? {torch.allclose(bg_vals, torch.tensor(-1.0), atol=1e-3)}")
+        
+        return sample
     
     def __len__(self):
         return len(self.samples)
