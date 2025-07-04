@@ -236,7 +236,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                         model, inputs, targets, t, e, b=betas, target_idx=target_idx,
                         perceptual_net=perceptual_net, keepdim=True
                     )
-                    loss = loss_dict['total_loss']
+                    loss = loss_dict['total_loss'].mean()
 
                 # Debug: print shapes and values before reducing
                 print(f"[Batch {batch_idx}] Loss shapes: "
