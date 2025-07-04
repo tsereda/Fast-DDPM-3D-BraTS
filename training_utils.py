@@ -112,11 +112,10 @@ def validate_model(model, val_loader, device, betas, t_intervals):
 
 
 def get_beta_schedule(beta_schedule, beta_start, beta_end, num_diffusion_timesteps):
-    """Get beta schedule for diffusion"""
+    """Get beta schedule for diffusion, supports linear and cosine."""
     if beta_schedule == "linear":
         betas = np.linspace(beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64)
     elif beta_schedule == "cosine":
-        # Cosine schedule
         s = 0.008
         steps = num_diffusion_timesteps + 1
         x = np.linspace(0, num_diffusion_timesteps, steps, dtype=np.float64)
@@ -126,7 +125,6 @@ def get_beta_schedule(beta_schedule, beta_start, beta_end, num_diffusion_timeste
         betas = np.clip(betas, 0, 0.999)
     else:
         raise ValueError(f"Unknown beta schedule: {beta_schedule}")
-    
     return betas
 
 

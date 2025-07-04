@@ -27,7 +27,6 @@ def nonlinearity(x):
 def Normalize(in_channels, num_groups=32):
     """
     Improved GroupNorm with better group selection for 3D medical imaging
-    
     Uses a more sophisticated approach to select the number of groups:
     - Ensures sufficient channels per group (minimum 4)
     - Falls back to fewer groups if needed
@@ -35,32 +34,18 @@ def Normalize(in_channels, num_groups=32):
     """
     if in_channels == 0:
         return nn.Identity()
-    
-    # For very small channel counts, use LayerNorm instead
     if in_channels <= 8:
-        # LayerNorm over spatial dimensions for medical images
         return nn.GroupNorm(num_groups=1, num_channels=in_channels, eps=1e-5, affine=True)
-    
-    # Ensure minimum 4 channels per group for stable statistics
     min_channels_per_group = 4
     max_groups = in_channels // min_channels_per_group
-    
-    # Use standard approach but with better fallback
     num_groups = min(num_groups, max_groups, in_channels)
-    
-    # Find largest divisor that gives reasonable group size
     while num_groups > 1 and in_channels % num_groups != 0:
         num_groups -= 1
-    
-    # Ensure we have at least 2 groups for the benefits of GroupNorm
     if num_groups == 1 and in_channels >= 8:
-        # Find the best divisor close to desired groups
         possible_groups = [i for i in range(2, min(33, in_channels + 1)) if in_channels % i == 0]
         if possible_groups:
-            # Choose group count closest to 32 or in_channels//4, whichever is smaller
             target = min(32, in_channels // 4)
             num_groups = min(possible_groups, key=lambda x: abs(x - target))
-    
     return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-5, affine=True)
 
 

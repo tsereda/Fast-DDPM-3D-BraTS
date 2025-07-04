@@ -143,6 +143,10 @@ def load_brats_case(case_path, modalities, volume_size, target_modality):
             volume = 2 * (volume - v_min) / (v_max - v_min) - 1
         return np.clip(volume, -1.0, 1.0)
 
+    def denormalize_volume(volume):
+        # Convert from [-1,1] to [0,1] for saving or visualization
+        return np.clip((volume + 1) / 2, 0, 1)
+
     # Find available files
     vol_files = find_modality_files(case_path, modalities)
     volumes = {}
