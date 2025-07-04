@@ -212,7 +212,12 @@ def brats_4to1_enhanced_loss(model,
     grad_pred = compute_3d_gradient(x_pred)
     gradient_loss = F.mse_loss(grad_pred, grad_target, reduction='none')
     gradient_loss = gradient_loss.mean(dim=(1, 2, 3, 4) if keepdim else None)
-    ssim_value = compute_3d_ssim(x_pred, x_target)
+    
+    # Clamp x_pred and x_target to [-1, 1] before SSIM computation
+    x_pred_clamped = torch.clamp(x_pred, -1.0, 1.0)
+    x_target_clamped = torch.clamp(x_target, -1.0, 1.0)
+    
+    ssim_value = compute_3d_ssim(x_pred_clamped, x_target_clamped)
     ssim_loss = 1 - ssim_value
     perceptual_loss = 0
     if perceptual_net is not None:
