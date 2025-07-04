@@ -274,7 +274,7 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     }, step=global_step)
                     
                     # Generate and log samples for debugging
-                    if global_step % args.sample_every == 0 and global_step > 0:
+                    if (global_step % args.sample_every == 0 or global_step == 1) and global_step > 0:
                         generate_and_log_samples(
                             model, val_loader, betas, t_intervals, device, global_step, num_samples=6
                         )
