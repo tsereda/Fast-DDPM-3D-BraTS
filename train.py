@@ -267,9 +267,9 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     }, step=global_step)
 
                 # Loss validation
-                if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
-                    raise ValueError(f"Invalid loss: {loss.item()}")
-                
+                if torch.isnan(loss).any() or torch.isinf(loss).any() or loss.mean().item() < 0:
+                    raise ValueError(f"Invalid loss: {loss}")
+
                 # Backward pass
                 if args.no_mixed_precision:
                     loss.backward()
