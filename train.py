@@ -238,22 +238,29 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                     )
                     loss = loss_dict['total_loss']
 
-                # Print each loss component for every batch
+                # Debug: print shapes and values before reducing
+                print(f"[Batch {batch_idx}] Loss shapes: "
+                      f"MSE: {loss_dict['mse_loss'].shape}, "
+                      f"Grad: {loss_dict['gradient_loss'].shape}, "
+                      f"SSIM: {loss_dict['ssim_loss'].shape}, "
+                      f"Perceptual: {loss_dict['perceptual_loss'].shape}, "
+                      f"Total: {loss.shape}")
+                # Print each loss component for every batch (mean values)
                 print(f"[Batch {batch_idx}] Loss components: "
                       f"MSE: {loss_dict['mse_loss'].mean().item():.4f}, "
                       f"Grad: {loss_dict['gradient_loss'].mean().item():.4f}, "
                       f"SSIM: {loss_dict['ssim_loss'].mean().item():.4f}, "
                       f"Perceptual: {loss_dict['perceptual_loss'].mean().item():.4f}, "
-                      f"Total: {loss.item():.4f}")
+                      f"Total: {loss.mean().item():.4f}")
 
-                # W&B logging for each loss component
+                # W&B logging for each loss component (mean values)
                 if use_wandb:
                     wandb.log({
-                        'train/loss': loss.item(),
-                        'train/loss_mse': float(loss_dict['mse_loss']),
-                        'train/loss_gradient': float(loss_dict['gradient_loss']),
-                        'train/loss_ssim': float(loss_dict['ssim_loss']),
-                        'train/loss_perceptual': float(loss_dict['perceptual_loss']),
+                        'train/loss': loss.mean().item(),
+                        'train/loss_mse': loss_dict['mse_loss'].mean().item(),
+                        'train/loss_gradient': loss_dict['gradient_loss'].mean().item(),
+                        'train/loss_ssim': loss_dict['ssim_loss'].mean().item(),
+                        'train/loss_perceptual': loss_dict['perceptual_loss'].mean().item(),
                         'train/learning_rate': optimizer.param_groups[0]["lr"],
                         'train/step': global_step,
                         'train/target_idx': target_idx,
