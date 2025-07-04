@@ -231,11 +231,61 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 # Backward pass
                 if args.no_mixed_precision:
                     loss.backward()
+                    # Gradient statistics
+                    total_norm = 0.0
+                    grad_min = float('inf')
+                    grad_max = float('-inf')
+                    grad_sum = 0.0
+                    grad_count = 0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2).item()
+                            total_norm += param_norm ** 2
+                            grad_min = min(grad_min, p.grad.data.min().item())
+                            grad_max = max(grad_max, p.grad.data.max().item())
+                            grad_sum += p.grad.data.sum().item()
+                            grad_count += p.grad.data.numel()
+                    total_norm = total_norm ** 0.5
+                    grad_mean = grad_sum / grad_count if grad_count > 0 else 0.0
+                    print(f"Grad stats - norm: {total_norm:.4f}, min: {grad_min:.4e}, max: {grad_max:.4e}, mean: {grad_mean:.4e}")
+                    logging.info(f"Grad stats - norm: {total_norm:.4f}, min: {grad_min:.4e}, max: {grad_max:.4e}, mean: {grad_mean:.4e}")
+                    if use_wandb:
+                        wandb.log({
+                            'grad/norm': total_norm,
+                            'grad/min': grad_min,
+                            'grad/max': grad_max,
+                            'grad/mean': grad_mean,
+                        }, step=global_step)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
                     optimizer.step()
                 else:
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
+                    # Gradient statistics (after unscale)
+                    total_norm = 0.0
+                    grad_min = float('inf')
+                    grad_max = float('-inf')
+                    grad_sum = 0.0
+                    grad_count = 0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2).item()
+                            total_norm += param_norm ** 2
+                            grad_min = min(grad_min, p.grad.data.min().item())
+                            grad_max = max(grad_max, p.grad.data.max().item())
+                            grad_sum += p.grad.data.sum().item()
+                            grad_count += p.grad.data.numel()
+                    total_norm = total_norm ** 0.5
+                    grad_mean = grad_sum / grad_count if grad_count > 0 else 0.0
+                    print(f"Grad stats - norm: {total_norm:.4f}, min: {grad_min:.4e}, max: {grad_max:.4e}, mean: {grad_mean:.4e}")
+                    logging.info(f"Grad stats - norm: {total_norm:.4f}, min: {grad_min:.4e}, max: {grad_max:.4e}, mean: {grad_mean:.4e}")
+                    if use_wandb:
+                        wandb.log({
+                            'grad/norm': total_norm,
+                            'grad/min': grad_min,
+                            'grad/max': grad_max,
+                            'grad/mean': grad_mean,
+                        }, step=global_step)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
                     scaler.step(optimizer)
                     scaler.update()
