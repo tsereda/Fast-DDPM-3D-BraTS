@@ -185,16 +185,16 @@ class BraTS3DUnifiedDataset(Dataset):
         target = sample['target']
         inputs = sample['input']
         
-        print(f"Target range: [{{target.min():.3f}}, {{target.max():.3f}}]")
-        print(f"Background values in target: {{target[target < -0.5].unique()}}")
-        print(f"Input ranges: {{[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}}")
+        print(f"Target range: [{target.min():.3f}, {target.max():.3f}]")
+        print(f"Background values in target: {target[target < -0.5].unique()}")
+        print(f"Input ranges: {[(inputs[i].min().item(), inputs[i].max().item()) for i in range(4)]}")
         
         # Check if background is actually -1
         background_mask = target < -0.5
         if background_mask.any():
             bg_vals = target[background_mask]
-            print(f"Background values: min={{bg_vals.min():.3f}}, max={{bg_vals.max():.3f}}, mean={{bg_vals.mean():.3f}}")
-            print(f"Background should be -1.0, is it? {{torch.allclose(bg_vals, torch.tensor(-1.0), atol=1e-3)}}")
+            print(f"Background values: min={bg_vals.min():.3f}, max={bg_vals.max():.3f}, mean={bg_vals.mean():.3f}")
+            print(f"Background should be -1.0, is it? {torch.allclose(bg_vals, torch.tensor(-1.0), atol=1e-3)}")
         
         self.validate_normalization_consistency(sample)
         
