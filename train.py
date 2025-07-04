@@ -357,34 +357,30 @@ def setup_datasets(args, config):
     
     # Determine sizes based on mode
     if args.use_full_volumes:
-        input_size = tuple(args.input_size)
-        crop_size = (64, 64, 64)  # Not used in full volume mode
-        mode_info = f"full volumes ({input_size})"
+        volume_size = tuple(args.input_size)
+        samples_per_volume = 1
+        mode_info = f"full volumes ({volume_size})"
     else:
-        input_size = tuple(args.patch_size)
-        crop_size = tuple(args.patch_size)
-        mode_info = f"patches ({crop_size})"
-    
+        volume_size = tuple(args.patch_size)
+        samples_per_volume = args.crops_per_volume
+        mode_info = f"patches ({volume_size})"
+
     logging.info(f"Data processing mode: {mode_info}")
-    
+
     train_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
         phase='train',
-        crop_size=crop_size,
-        use_full_volumes=args.use_full_volumes,
-        input_size=input_size,
-        crops_per_volume=args.crops_per_volume
+        volume_size=volume_size,
+        samples_per_volume=samples_per_volume
     )
     
     val_dataset = BraTS3DUnifiedDataset(
         data_root=args.data_root,
         phase='val',
-        crop_size=crop_size,
-        use_full_volumes=args.use_full_volumes,
-        input_size=input_size,
-        crops_per_volume=1  # Always use 1 crop per volume for validation
+        volume_size=volume_size,
+        samples_per_volume=1  # Always use 1 crop per volume for validation
     )
-    
+
     if args.debug:
         debug_train_size = min(10, len(train_dataset))
         debug_val_size = min(5, len(val_dataset))
@@ -393,7 +389,7 @@ def setup_datasets(args, config):
         train_dataset = Subset(train_dataset, train_indices)
         val_dataset = Subset(val_dataset, val_indices)
         logging.info(f"Debug mode: using {debug_train_size} train samples, {debug_val_size} val samples")
-    
+
     return train_dataset, val_dataset
 
 
