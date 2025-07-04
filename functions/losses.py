@@ -61,39 +61,49 @@ def compute_3d_gradient(tensor):
 
 
 def compute_3d_ssim(x, y, window_size=11, window_sigma=1.5):
-    """Simplified 3D SSIM for structural similarity with robust denominator clamping"""
+    """Robust 3D SSIM for structural similarity with constant input handling and clamping."""
     # Create 3D Gaussian window
     coords = torch.arange(window_size, dtype=torch.float32, device=x.device)
     coords -= window_size // 2
-    
     g = torch.exp(-(coords**2) / (2 * window_sigma**2))
     g = g / g.sum()
-    
-    # Create 3D kernel
     kernel = g.view(1, 1, window_size, 1, 1) * g.view(1, 1, 1, window_size, 1) * g.view(1, 1, 1, 1, window_size)
     kernel = kernel.expand(x.size(1), 1, window_size, window_size, window_size)
-    
+
     # Compute means
     mu_x = F.conv3d(x, kernel, padding=window_size//2, groups=x.size(1))
     mu_y = F.conv3d(y, kernel, padding=window_size//2, groups=y.size(1))
-    
-    # Compute variances and covariance
     mu_x_sq = mu_x**2
     mu_y_sq = mu_y**2
     mu_xy = mu_x * mu_y
-    
     sigma_x_sq = F.conv3d(x**2, kernel, padding=window_size//2, groups=x.size(1)) - mu_x_sq
     sigma_y_sq = F.conv3d(y**2, kernel, padding=window_size//2, groups=y.size(1)) - mu_y_sq
     sigma_xy = F.conv3d(x*y, kernel, padding=window_size//2, groups=x.size(1)) - mu_xy
-    
+
+    # Clamp variances for stability
+    eps = 1e-6
+    sigma_x_sq = sigma_x_sq.clamp(min=eps)
+    sigma_y_sq = sigma_y_sq.clamp(min=eps)
+    sigma_xy = sigma_xy.clamp(min=-1.0, max=1.0)  # Clamp covariance to avoid extreme values
+
     # SSIM computation
     c1 = 0.01**2
     c2 = 0.03**2
-    
     denom = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
-    denom = denom.clamp(min=1e-6)
+    denom = denom.clamp(min=eps)
     ssim_map = ((2*mu_xy + c1) * (2*sigma_xy + c2)) / denom
-    
+
+    # Handle constant input: if both are constant and equal, return 1.0; if both constant and not equal, return 0.0
+    is_const_x = (x.max(dim=2)[0].max(dim=2)[0].max(dim=2)[0] - x.min(dim=2)[0].min(dim=2)[0].min(dim=2)[0] < eps).all()
+    is_const_y = (y.max(dim=2)[0].max(dim=2)[0].max(dim=2)[0] - y.min(dim=2)[0].min(dim=2)[0].min(dim=2)[0] < eps).all()
+    if is_const_x and is_const_y:
+        if torch.allclose(x, y, atol=eps):
+            return torch.tensor(1.0, device=x.device, dtype=x.dtype)
+        else:
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+    # Clamp SSIM map to [0, 1] for safety
+    ssim_map = ssim_map.clamp(0, 1)
     return ssim_map.mean()
 
 
