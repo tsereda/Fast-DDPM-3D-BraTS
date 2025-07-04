@@ -240,10 +240,10 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
 
                 # Print each loss component for every batch
                 print(f"[Batch {batch_idx}] Loss components: "
-                      f"MSE: {loss_dict['mse_loss'].item():.4f}, "
-                      f"Grad: {loss_dict['gradient_loss'].item():.4f}, "
-                      f"SSIM: {loss_dict['ssim_loss'].item():.4f}, "
-                      f"Perceptual: {loss_dict['perceptual_loss'].item():.4f}, "
+                      f"MSE: {loss_dict['mse_loss'].mean().item():.4f}, "
+                      f"Grad: {loss_dict['gradient_loss'].mean().item():.4f}, "
+                      f"SSIM: {loss_dict['ssim_loss'].mean().item():.4f}, "
+                      f"Perceptual: {loss_dict['perceptual_loss'].mean().item():.4f}, "
                       f"Total: {loss.item():.4f}")
 
                 # W&B logging for each loss component
