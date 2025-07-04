@@ -379,8 +379,8 @@ def parse_args():
                        help='Use full volumes instead of random patches')
     parser.add_argument('--input_size', nargs=3, type=int, default=[80, 80, 80],
                        help='Input size for full volumes (default: 80 80 80)')
-    parser.add_argument('--patch_size', nargs=3, type=int, default=[80, 80, 80],
-                       help='Patch size for patch-based training (default: 80 80 80)')
+    parser.add_argument('--patch_size', nargs=3, type=int, default=[64, 64, 64],
+                       help='Patch size for patch-based training (default: 64 64 64)')
     parser.add_argument('--crops_per_volume', type=int, default=4,
                        help='Number of crops per volume for patch-based training (default: 4)')
 
