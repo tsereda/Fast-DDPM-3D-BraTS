@@ -231,11 +231,21 @@ def training_loop(model, train_loader, val_loader, optimizer, scheduler, scaler,
                 e = torch.randn_like(targets)
                 
                 # Compute loss with mixed precision
-
                 with autocast(enabled=not args.no_mixed_precision):
-                    loss = brats_4to1_enhanced_loss(model, inputs, targets, t, e, b=betas, target_idx=target_idx,
-                        perceptual_net=perceptual_net)
-                
+                    loss_dict = brats_4to1_enhanced_loss(
+                        model, inputs, targets, t, e, b=betas, target_idx=target_idx,
+                        perceptual_net=perceptual_net, keepdim=True
+                    )
+                    loss = loss_dict['total_loss']
+
+                # Print each loss component for every batch
+                print(f"[Batch {batch_idx}] Loss components: "
+                      f"MSE: {loss_dict['mse_loss']:.4f}, "
+                      f"Grad: {loss_dict['gradient_loss']:.4f}, "
+                      f"SSIM: {loss_dict['ssim_loss']:.4f}, "
+                      f"Perceptual: {loss_dict['perceptual_loss']:.4f}, "
+                      f"Total: {loss.item():.4f}")
+
                 # Loss validation
                 if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
                     raise ValueError(f"Invalid loss: {loss.item()}")
